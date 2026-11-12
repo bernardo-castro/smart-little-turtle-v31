@@ -10,21 +10,21 @@ Firmware en **Arduino** y puente de notificaciones en **Python (Windows 11)** pa
 - **Ruedas bloqueadas por software (`LOW`)** para uso seguro sobre el escritorio sin desplazarse.
 - **Pantalla LED `8x8` apagada** en reposo para no distraer.
 - **Paneo aleatorio silencioso:** cada **30 segundos**, el servo del cuello (`D10`) gira suavemente a una posición aleatoria entre `~52°` y `~128°` mediante pulsos manuales a `50 Hz` exactos (`7 µs` por cuadro de `20 ms`), cortando la señal al terminar para eliminar cualquier zumbido mecánico.
-- **Saludo por proximidad:** cuando el sensor ultrasónico (`HC-SR04`) detecta presencia a `<= 35 cm`, desplaza el texto **`"Buen día!"`** de derecha a izquierda en la matriz `8x8` y vuelve al reposo.
+- **Saludo por proximidad corta:** cuando el sensor ultrasónico (`HC-SR04`) detecta que pasas la mano bien cerca (`<= 10 cm`), desplaza el texto **`"Buen día!"`** de derecha a izquierda en la matriz `8x8` y vuelve al reposo (evitando activaciones accidentales a media distancia en el escritorio).
 
-### 2. Notificaciones Bluetooth BLE en Paralelo (`DX-BT24`)
-El puente en Windows monitorea en tiempo real las notificaciones emergentes (*toasts*) de Windows 11 y envía comandos de un carácter por **BLE (`9600 bps`)** sin interrumpir la lógica base del robot:
+### 2. Cola de Notificaciones Bluetooth BLE (`DX-BT24`) con Nombre del Remitente
+El puente en Windows monitorea en tiempo real las notificaciones emergentes (*toasts*) de Windows 11, extrae el **nombre de quien envía el mensaje** y transmite el aviso por **BLE (`9600 bps`)** al robot:
 
-| Evento / Comando BLE | Acción del Robot | Ícono `8x8` |
+| Evento / Trama BLE | Acción del Robot | Pantalla `8x8` |
 | :--- | :--- | :--- |
-| **`M`** (Nuevo correo en Gmail / Outlook) | Gira la cabeza al frente (`90°`) y muestra un sobre con efecto suave de respiración lumínica. | `✉` Sobre animado |
-| **`C`** o **`H`** (Mensaje en Google Chat / Hangouts, incluyendo Chat integrado en Gmail) | Gira la cabeza al frente (`90°`) y muestra un globo de diálogo animando líneas de texto. | `💬` Globo animado |
+| **`M:<Remitente>`** (Nuevo correo en Gmail / Outlook) | Encola el correo, gira al frente (`90°`), muestra el sobre respirando (`~3.2 s`) y desplaza el **nombre del remitente**. | `✉` → `Nombre` |
+| **`C:<Remitente>`** (Mensaje en Google Chat / Hangouts o Chat integrado en Gmail) | Encola el chat, gira al frente (`90°`), muestra el globo animado (`~3.2 s`) y desplaza el **nombre de quien escribió**. | `💬` → `Nombre` |
 | **`B`** (Saludo remoto manual) | Desplaza el mensaje `"Buen día!"` en pantalla. | Texto `Buen día!` |
-| **`X`** (Limpiar aviso) | Apaga inmediatamente la notificación activa y regresa al reposo. | Pantalla apagada |
+| **`X`** (Limpiar cola) | Vacía inmediatamente todas las notificaciones pendientes y regresa al reposo. | Pantalla apagada |
 
-**Descarte sin tocar el teclado:**
-- **Gesto con la mano:** al acercar la mano a `<= 35 cm` mientras hay una notificación activa, el robot muestra un tilde **`✔`** de confirmación y apaga la pantalla.
-- **Auto-apagado:** si no se descarta manualmente, el aviso se limpia solo tras **3 minutos** y el robot retoma su ciclo de observación.
+**Cola inteligente y borrado de a uno con la mano (`<= 10 cm`):**
+- **Iteración continua:** si llegan varios mensajes seguidos (hasta `10` en cola), el robot los recorre uno tras otro mostrando su ícono correspondiente (`✉` o `💬`) seguido de su posición y remitente (por ejemplo, `1/3 Sylvia`, `2/3 Renato`, `3/3 Ana`).
+- **Borrado individual por proximidad:** cada vez que acercas la mano a `<= 10 cm` del sensor ultrasónico, el robot muestra un tilde **`✔`**, **borra únicamente el mensaje actual** y pasa al siguiente pendiente hasta vaciar la cola y apagar la pantalla.
 
 ### 3. Inicio Automático Inteligente en Windows (0 Consumo Inactivo)
 - Se lanza de forma invisible (`pythonw.exe bt_notifier.py --auto`) **al iniciar sesión en Windows**.
@@ -114,10 +114,10 @@ Una vez finalizada la carga, apaga el robot, inserta nuevamente el módulo **DX-
 ## Pruebas Manuales y Diagnóstico
 
 - **Modo consola interactivo:** ejecuta `pc_bluetooth_bridge\iniciar_notificaciones.bat` (debes no tener la instancia automática corriendo o detenerla antes). Permite enviar comandos en vivo presionando:
-  - `[m]` + Enter → Probar aviso de **Correo (`✉`)**
-  - `[c]` + Enter → Probar aviso de **Chat (`💬`)**
+  - `[m:Juan Perez]` + Enter → Probar aviso de **Correo (`✉`)** con remitente
+  - `[c:Sylvia]` + Enter → Probar aviso de **Chat (`💬`)** con remitente
   - `[b]` + Enter → Disparar saludo **`"Buen día!"`**
-  - `[x]` + Enter → Limpiar notificación en pantalla
+  - `[x]` + Enter → Vaciar toda la cola de notificaciones
   - `[q]` + Enter → Salir
 - **Registro de actividad:** en modo automático, los eventos de conexión y notificaciones enviadas se guardan en `pc_bluetooth_bridge\bt_notifier.log` (con rotación automática a `256 KB`).
 - **Desinstalar el arranque automático:**
