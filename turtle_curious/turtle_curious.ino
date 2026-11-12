@@ -1,24 +1,24 @@
 // ============================================================================
 // Keyestudio Smart Little Turtle V3.1
-// Observador Silencioso + "Buen día!" (<=10 cm) + Cola BLE (Mail, Chat, Meet)
+// Seguimiento Vivo de Mano con Ojos + Levantamiento "O_o" + Cola BLE
 // ============================================================================
-// 1) ESTADO DE REPOSO:
+// 1) ESTADO DE REPOSO Y SEGUIMIENTO DE MANO:
 //    - Pantalla 8x8 apagada y motores bloqueados en LOW.
 //    - Giro suave aleatorio entre 10 y 30 segundos (~52° a ~128°, 50 Hz).
-//    - Si pasas la mano bien cerca del sensor (<= 10 cm), desplaza "Buen día!".
+//    - Al acercar la mano (<= 12 cm): despierta sus ojos (brillo 8), engancha
+//      tu mano con el sensor ultrasónico y GIRA EL CUELLO SIGUIÉNDOLA hacia
+//      donde la muevas, orientando sus ojos hacia esa misma dirección; al
+//      retirar la mano se despide con un guiño/sonrisa y vuelve al reposo.
+//    - Si levantas el robot de la mesa: pone cara "O_o" / "o_O" al instante.
 //
 // 2) COLA DE NOTIFICACIONES BLUETOOTH DX-BT24 (UART 9600 bps en RX/TX):
-//    - Formatos recibidos desde PC:
+//    - Íconos en brillo 15; textos y gestos en brillo 8:
 //        "M:<Remitente>\n"        -> EMAIL (✉) + nombre del remitente
 //        "C:<Remitente>\n"        -> CHAT  (💬) + nombre del remitente
-//        "R:<Min>:<Reunión>\n"    -> REUNIÓN (⏰) con cuenta regresiva viva:
-//                                      * Min > 0  : "En 10m: <Reunión>" (baja cada min)
-//                                      * Min == 0 : "Inicia ya: <Reunión>"
-//                                      * Min < 0  : "Ya inició (3m): <Reunión>"
+//        "R:<Min>:<Reunión>\n"    -> REUNIÓN (⏰) con cuenta regresiva viva
 //        "X\n"                    -> Limpia toda la cola
 //        "B\n"                    -> Saludo remoto "Buen día!"
-//    - Si hay varios avisos, los itera continuamente y al acercar la mano
-//      (<= 10 cm) muestra ✔ y los va borrando de a UNO.
+//    - Acercar la mano (<= 10 cm) con avisos activos muestra ✔ y borra de a UNO.
 // ============================================================================
 
 #include <Wire.h>
@@ -32,12 +32,17 @@ const int ML_PWM     = 6;
 const int MR_PWM     = 9;
 
 // --- Servo del cuello (D10) ---
-const int SERVO_PIN       = 10;
-const int PULSE_MIN_US    = 1070; // ~52° derecha
-const int PULSE_CENTER_US = 1490; // ~90° frente
-const int PULSE_MAX_US    = 1910; // ~128° izquierda
-const int PULSE_STEP_US   = 7;    // Velocidad suave
-const int MIN_DELTA_US    = 260;  // Mínimo ~24° por giro aleatorio
+// Nota física: menor pulso (~960 µs) gira hacia x=0 (izquierda vista de frente);
+//              mayor pulso (~2020 µs) gira hacia x=7 (derecha vista de frente).
+const int SERVO_PIN          = 10;
+const int PULSE_MIN_US       = 1070; // ~52° límite reposo
+const int PULSE_CENTER_US    = 1490; // ~90° frente
+const int PULSE_MAX_US       = 1910; // ~128° límite reposo
+const int TRACK_PULSE_MIN_US = 960;  // ~40° límite seguimiento de mano
+const int TRACK_PULSE_MAX_US = 2020; // ~140° límite seguimiento de mano
+const int PULSE_STEP_US      = 7;    // Velocidad suave en reposo
+const int TRACK_STEP_US      = 14;   // Velocidad ágil siguiendo tu mano
+const int MIN_DELTA_US       = 260;  // Mínimo ~24° por giro aleatorio
 
 // --- Tiempos ---
 const unsigned long OBSERVE_MIN_MS = 10000UL; // Pausa aleatoria mín: 10 s
@@ -45,10 +50,12 @@ const unsigned long OBSERVE_MAX_MS = 30000UL; // Pausa aleatoria máx: 30 s
 const unsigned long ICON_HOLD_MS   = 3200UL;  // Segundos mostrando ícono antes del texto
 const unsigned int  SCROLL_STEP_MS = 70;      // Velocidad de desplazamiento de texto
 
-// --- Sensor Ultrasónico (proximidad corta: ~10 cm) ---
-const int   TRIG_PIN       = 12;
-const int   ECHO_PIN       = 13;
-const float NEAR_DETECT_CM = 10.0f;
+// --- Sensor Ultrasónico ---
+const int   TRIG_PIN        = 12;
+const int   ECHO_PIN        = 13;
+const float NEAR_DETECT_CM  = 10.0f; // Distancia para borrar avisos (<= 10 cm)
+const float TRACK_START_CM  = 12.0f; // Distancia para enganchar tu mano en reposo
+const float TRACK_HOLD_CM   = 26.0f; // Rango de seguimiento activo una vez enganchada
 
 // --- Sensores Infrarrojos Inferiores (detector de levantamiento de la mesa) ---
 const int LINE_L_PIN = 11;
@@ -102,9 +109,8 @@ bool triggerRemoteBuenDia = false;
 
 int currentPulseUs               = PULSE_CENTER_US;
 unsigned long pauseStartMs       = 0;
-unsigned long nextObservePauseMs = 25000UL;
-bool hasSaidBuenDia              = false;
-uint8_t lastCuteGesture          = 255;
+unsigned long nextObservePauseMs = 20000UL;
+int8_t lastGoodbyeGesture        = 0;
 
 unsigned long pickRandomObservePauseMs() {
   return (unsigned long)random(OBSERVE_MIN_MS, OBSERVE_MAX_MS + 1UL);
@@ -165,25 +171,30 @@ const uint8_t ICON_HAPPY[8] = {
   0x00, 0x42, 0xA5, 0x00, 0x00, 0x42, 0x3C, 0x00
 };
 
-// Repertorio expresivo Opción A (ojitos despiertos, parpadeo, guiño y corazón latiente)
-const uint8_t ICON_EYES_OPEN[8] = {
-  0x00, 0x66, 0xE7, 0xE7, 0x66, 0x00, 0x18, 0x00
+// Ojos dinámicos para seguimiento de mano (orientan la mirada según dirección)
+// Centro: ojos centrados mirando al frente
+const uint8_t ICON_TRACK_CENTER[8] = {
+  0x00, 0x66, 0x66, 0x66, 0x66, 0x00, 0x18, 0x00
 };
 
-const uint8_t ICON_EYES_BLINK[8] = {
-  0x00, 0x00, 0x00, 0xE7, 0x00, 0x00, 0x18, 0x00
+// Mirando hacia x=0 (cuando el cuello gira hacia PULSE_MIN_US)
+const uint8_t ICON_TRACK_LEFT[8] = {
+  0x00, 0x03, 0x33, 0x33, 0x33, 0x00, 0x0C, 0x00
 };
 
+// Mirando hacia x=7 (cuando el cuello gira hacia PULSE_MAX_US)
+const uint8_t ICON_TRACK_RIGHT[8] = {
+  0x00, 0xC0, 0xCC, 0xCC, 0xCC, 0x00, 0x30, 0x00
+};
+
+// Parpadeo suave mientras observa tu mano
+const uint8_t ICON_TRACK_BLINK[8] = {
+  0x00, 0x00, 0x00, 0x66, 0x00, 0x00, 0x18, 0x00
+};
+
+// Guiño de despedida al retirar la mano
 const uint8_t ICON_WINK[8] = {
   0x00, 0x06, 0x07, 0xE7, 0x06, 0x40, 0x3C, 0x00
-};
-
-const uint8_t ICON_HEART_BIG[8] = {
-  0x00, 0x66, 0xFF, 0xFF, 0x7E, 0x3C, 0x18, 0x00
-};
-
-const uint8_t ICON_HEART_SMALL[8] = {
-  0x00, 0x00, 0x24, 0x7E, 0x3C, 0x18, 0x00, 0x00
 };
 
 // ============================================================================
@@ -375,6 +386,39 @@ bool isSomeoneNear() {
   delay(8);
   float d2 = readDistanceFastCm();
   return (d2 <= NEAR_DETECT_CM + 1.5f);
+}
+
+bool isHandReadyToTrack() {
+  float d1 = readDistanceFastCm();
+  if (d1 > TRACK_START_CM) {
+    return false;
+  }
+  delay(8);
+  float d2 = readDistanceFastCm();
+  return (d2 <= TRACK_START_CM + 2.0f);
+}
+
+// Lectura rápida para bucle de seguimiento 50 Hz (timeout corto ~44 cm)
+float readTrackDistanceCm() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  unsigned long duration = pulseIn(ECHO_PIN, HIGH, 2600UL);
+  if (duration == 0) {
+    // Segundo pulso rápido por si la mano estaba inclinada
+    delayMicroseconds(200);
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+    duration = pulseIn(ECHO_PIN, HIGH, 2600UL);
+    if (duration == 0) {
+      return 999.0f;
+    }
+  }
+  return (duration * 0.0343f) / 2.0f;
 }
 
 // --- Detección de levantamiento mediante los 3 sensores IR inferiores ---
@@ -777,81 +821,184 @@ bool waitInteractiveMs(unsigned long ms) {
   return true;
 }
 
-// --- Opción A: Primera vez "Buen día!", luego repertorio vivo de gestos (brillo 8) ---
-void playHandPersonalityGreeting() {
-  digitalWrite(SERVO_PIN, LOW);
-  randomSeed(random(100000L) ^ micros());
+// --- Seguimiento activo de tu mano con el cuello + ojos direccionales ---
+enum TrackState : uint8_t {
+  TRK_LOCKED    = 0,
+  TRK_PROBE_1   = 1,
+  TRK_PROBE_2   = 2,
+  TRK_CENTERING = 3
+};
 
-  // 1) Despertar ojitos y parpadear con curiosidad
+void showTrackingEyes(int8_t gazeDir, bool blinking) {
   setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
-  showRows(ICON_EYES_OPEN);
-  if (!waitInteractiveMs(220)) return;
-  showRows(ICON_EYES_BLINK);
-  if (!waitInteractiveMs(85)) return;
-  showRows(ICON_EYES_OPEN);
-  if (!waitInteractiveMs(180)) return;
-  showRows(ICON_EYES_BLINK);
-  if (!waitInteractiveMs(85)) return;
-  showRows(ICON_EYES_OPEN);
-  if (!waitInteractiveMs(220)) return;
-
-  // 2) La primera vez tras encenderse saluda con "Buen día!" + sonrisa
-  if (!hasSaidBuenDia) {
-    hasSaidBuenDia = true;
-    panSmoothTo(PULSE_CENTER_US, false);
-    scrollText(MSG_BUEN_DIA, false, true);
-    if (notifCount > 0) return;
-    setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
-    showRows(ICON_HAPPY);
-    if (!waitInteractiveMs(750)) return;
-    clearScreen();
-    return;
-  }
-
-  // 3) Siguientes veces: elegir gesto simpático al azar sin repetir el anterior
-  uint8_t gesture = (uint8_t)random(0, 3);
-  if (gesture == lastCuteGesture) {
-    gesture = (gesture + 1) % 3;
-  }
-  lastCuteGesture = gesture;
-
-  setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
-
-  if (gesture == 0) {
-    // Gesto 0: Guiño cómplice + pequeña inclinación curiosa de cabeza
-    int tiltTarget = (currentPulseUs <= PULSE_CENTER_US)
-                       ? min(PULSE_MAX_US, currentPulseUs + 150)
-                       : max(PULSE_MIN_US, currentPulseUs - 150);
-    showRows(ICON_WINK);
-    panSmoothTo(tiltTarget, false);
-    if (!waitInteractiveMs(650)) return;
-    showRows(ICON_EYES_OPEN);
-    if (!waitInteractiveMs(300)) return;
-  } else if (gesture == 1) {
-    // Gesto 1: Sonrisa radiante "^_^" + pequeño meneo alegre de cuello
-    showRows(ICON_HAPPY);
-    int leftNudge  = min(PULSE_MAX_US, PULSE_CENTER_US + 90);
-    int rightNudge = max(PULSE_MIN_US, PULSE_CENTER_US - 90);
-    panSmoothTo(leftNudge, false);
-    panSmoothTo(rightNudge, false);
-    panSmoothTo(PULSE_CENTER_US, false);
-    if (!waitInteractiveMs(650)) return;
+  if (blinking) {
+    showRows(ICON_TRACK_BLINK);
+  } else if (gazeDir < 0) {
+    showRows(ICON_TRACK_LEFT);
+  } else if (gazeDir > 0) {
+    showRows(ICON_TRACK_RIGHT);
   } else {
-    // Gesto 2: Corazoncito latiente "lub-dub" (2 latidos en brillo 8)
-    panSmoothTo(PULSE_CENTER_US, false);
-    for (uint8_t beat = 0; beat < 2; beat++) {
-      showRows(ICON_HEART_SMALL);
-      if (!waitInteractiveMs(130)) return;
-      showRows(ICON_HEART_BIG);
-      if (!waitInteractiveMs(260)) return;
-    }
-    showRows(ICON_HAPPY);
-    if (!waitInteractiveMs(450)) return;
+    showRows(ICON_TRACK_CENTER);
   }
+}
+
+void trackHandWithEyes() {
+  setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
+
+  // Despertar rápido con un parpadeo al detectar tu mano
+  showRows(ICON_TRACK_CENTER);
+  if (!waitInteractiveMs(120)) return;
+  showRows(ICON_TRACK_BLINK);
+  if (!waitInteractiveMs(75)) return;
+  showRows(ICON_TRACK_CENTER);
+
+  TrackState state       = TRK_LOCKED;
+  int8_t trackDir        = 1;   // +1 = hacia PULSE_MAX_US (ICON_TRACK_RIGHT), -1 = hacia PULSE_MIN_US (ICON_TRACK_LEFT)
+  int8_t activeGaze      = 0;
+  uint8_t gazeHoldFrames = 0;
+  uint8_t centerFrames   = 0;
+  int sweepStartUs       = currentPulseUs;
+  unsigned long lastBlinkMs = millis();
+
+  while (true) {
+    unsigned long frameStartUs = micros();
+
+    pollBluetooth();
+    if (isRobotLifted()) {
+      digitalWrite(SERVO_PIN, LOW);
+      handleLiftedReaction();
+      return;
+    }
+    if (notifCount > 0) {
+      digitalWrite(SERVO_PIN, LOW);
+      return;
+    }
+
+    float dist = readTrackDistanceCm();
+    bool handSeen = (dist <= TRACK_HOLD_CM);
+    bool movedServo = false;
+
+    if (state == TRK_LOCKED) {
+      if (handSeen) {
+        // Mano frente a sus ojos: mantener servo quieto sin ruido
+        if (gazeHoldFrames > 0) {
+          gazeHoldFrames--;
+        } else if (currentPulseUs < 1200) {
+          activeGaze = -1;
+        } else if (currentPulseUs > 1780) {
+          activeGaze = 1;
+        } else {
+          activeGaze = 0;
+        }
+      } else {
+        // Tu mano se desplazó hacia un costado -> salir a buscarla en la dirección de inercia
+        state        = TRK_PROBE_1;
+        sweepStartUs = currentPulseUs;
+        activeGaze   = trackDir;
+      }
+    }
+
+    if (state == TRK_PROBE_1) {
+      if (handSeen) {
+        state          = TRK_CENTERING;
+        centerFrames   = 4;
+        activeGaze     = trackDir;
+        gazeHoldFrames = 10;
+      } else {
+        int nextUs = currentPulseUs + (int)trackDir * TRACK_STEP_US;
+        bool hitLimit = (nextUs < TRACK_PULSE_MIN_US || nextUs > TRACK_PULSE_MAX_US);
+        bool sweptEnough = (abs(nextUs - sweepStartUs) >= 240);
+
+        if (hitLimit || sweptEnough) {
+          // No estaba de este lado -> invertir mirada y cuello hacia el otro lado al instante
+          trackDir   = -trackDir;
+          activeGaze = trackDir;
+          state      = TRK_PROBE_2;
+        } else {
+          currentPulseUs = nextUs;
+          movedServo     = true;
+          activeGaze     = trackDir;
+        }
+      }
+    } else if (state == TRK_PROBE_2) {
+      if (handSeen) {
+        state          = TRK_CENTERING;
+        centerFrames   = 4;
+        activeGaze     = trackDir;
+        gazeHoldFrames = 10;
+      } else {
+        int nextUs = currentPulseUs + (int)trackDir * TRACK_STEP_US;
+        bool hitLimit = (nextUs < TRACK_PULSE_MIN_US || nextUs > TRACK_PULSE_MAX_US);
+        bool sweptOtherSide = (abs(nextUs - sweepStartUs) >= 340);
+
+        if (hitLimit || sweptOtherSide) {
+          // Ya revisó ambos lados y retiraste la mano -> despedirse simpático y salir
+          break;
+        } else {
+          currentPulseUs = nextUs;
+          movedServo     = true;
+          activeGaze     = trackDir;
+        }
+      }
+    } else if (state == TRK_CENTERING) {
+      // Avanzar unos pocos grados dentro del cono para quedar centrado en tu palma
+      if (handSeen && centerFrames > 0) {
+        int nextUs = currentPulseUs + (int)trackDir * TRACK_STEP_US;
+        if (nextUs >= TRACK_PULSE_MIN_US && nextUs <= TRACK_PULSE_MAX_US) {
+          currentPulseUs = nextUs;
+          movedServo     = true;
+        }
+        centerFrames--;
+        activeGaze = trackDir;
+      } else {
+        state          = TRK_LOCKED;
+        gazeHoldFrames = 10;
+      }
+    }
+
+    if (movedServo) {
+      pulseServoOnce(currentPulseUs);
+    } else {
+      digitalWrite(SERVO_PIN, LOW);
+    }
+
+    // Parpadeo natural cada ~3.2 s mientras sigue tu mano
+    unsigned long nowMs = millis();
+    bool blinking = false;
+    if (nowMs - lastBlinkMs >= 3200UL) {
+      blinking = true;
+      if (nowMs - lastBlinkMs >= 3290UL) {
+        lastBlinkMs = nowMs;
+        blinking = false;
+      }
+    }
+    showTrackingEyes(activeGaze, blinking);
+
+    unsigned long elapsedUs = micros() - frameStartUs;
+    if (elapsedUs < 20000UL) {
+      unsigned long remUs = 20000UL - elapsedUs;
+      if (remUs > 1000UL) {
+        delay(remUs / 1000UL);
+      }
+      delayMicroseconds(remUs % 1000UL);
+    }
+  }
+
+  digitalWrite(SERVO_PIN, LOW);
+
+  // Despedida simpática al retirar la mano (alterna guiño y sonrisa en brillo 8)
+  setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
+  if (lastGoodbyeGesture == 0) {
+    showRows(ICON_WINK);
+    lastGoodbyeGesture = 1;
+  } else {
+    showRows(ICON_HAPPY);
+    lastGoodbyeGesture = 0;
+  }
+  if (!waitInteractiveMs(650)) return;
 
   if (notifCount == 0) {
     clearScreen();
-    delay(450);
   }
 }
 
@@ -1056,10 +1203,10 @@ void loop() {
   }
 
   // ==========================================================================
-  // ESTADO DE REPOSO (Pantalla oscura + Gestos <= 10 cm + Giro 20~30 s)
+  // ESTADO DE REPOSO (Pantalla oscura + Seguimiento de mano + Giro 10~30 s)
   // ==========================================================================
-  if (isSomeoneNear()) {
-    playHandPersonalityGreeting();
+  if (isHandReadyToTrack()) {
+    trackHandWithEyes();
     pauseStartMs       = millis();
     nextObservePauseMs = pickRandomObservePauseMs();
     return;
@@ -1070,7 +1217,7 @@ void loop() {
     bool spottedSomeone = panSmoothTo(randomTargetUs, true);
 
     if (spottedSomeone && notifCount == 0) {
-      playHandPersonalityGreeting();
+      trackHandWithEyes();
     }
 
     pauseStartMs       = millis();
