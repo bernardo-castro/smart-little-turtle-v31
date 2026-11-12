@@ -57,7 +57,9 @@ const int LINE_R_PIN = 8;
 bool deskCalibrated  = false;
 
 // --- Matriz 8x8 HT16K33 (I2C 0x70) ---
-const uint8_t HT16K33_ADDR = 0x70;
+const uint8_t HT16K33_ADDR            = 0x70;
+const uint8_t BRIGHTNESS_NOTIF_ICON   = 15; // Brillo máximo para íconos de notificación
+const uint8_t BRIGHTNESS_TEXT_GESTURE = 8;  // Brillo suave para letras y gestos/caritas
 
 // --- Cola de Notificaciones ---
 enum NotifType : uint8_t {
@@ -331,7 +333,7 @@ void ht16k33Init() {
   Wire.write(0x81);
   Wire.endTransmission();
 
-  setMatrixBrightness(8);
+  setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
 }
 
 void showRows(const uint8_t rowsTopToBottom[8]) {
@@ -345,7 +347,7 @@ void showRows(const uint8_t rowsTopToBottom[8]) {
 }
 
 void clearScreen() {
-  setMatrixBrightness(8);
+  setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
   const uint8_t empty[8] = {0, 0, 0, 0, 0, 0, 0, 0};
   showRows(empty);
 }
@@ -402,8 +404,8 @@ void pulseServoOnce(int pulseUs) {
 }
 
 void handleLiftedReaction() {
-  // Mostrar de inmediato "O_o" con brillo alto y mirar desconcertado a ambos lados
-  setMatrixBrightness(12);
+  // Mostrar de inmediato "O_o" en brillo 8 y mirar desconcertado a ambos lados
+  setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
   showRows(ICON_LIFT_Oo);
 
   const int lookLeft  = PULSE_CENTER_US + 180;
@@ -442,7 +444,7 @@ void handleLiftedReaction() {
   }
 
   // Al apoyarlo de vuelta en la mesa: carita feliz "^_^" de alivio
-  setMatrixBrightness(9);
+  setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
   showRows(ICON_HAPPY);
   unsigned long tBack = millis();
   while (millis() - tBack < 900UL) {
@@ -615,7 +617,7 @@ bool scrollText(const char* text, bool abortOnNear, bool abortOnNewNotifWhenIdle
     }
   }
 
-  setMatrixBrightness(8);
+  setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
 
   for (int offset = -7; offset <= totalCols; offset++) {
     pollBluetooth();
@@ -659,7 +661,7 @@ void dismissCurrentNotification() {
   }
   notifCount--;
 
-  setMatrixBrightness(10);
+  setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
   showRows(ICON_CHECK);
 
   unsigned long t0 = millis();
@@ -775,13 +777,13 @@ bool waitInteractiveMs(unsigned long ms) {
   return true;
 }
 
-// --- Opción A: Primera vez "Buen día!", luego repertorio vivo de gestos ---
+// --- Opción A: Primera vez "Buen día!", luego repertorio vivo de gestos (brillo 8) ---
 void playHandPersonalityGreeting() {
   digitalWrite(SERVO_PIN, LOW);
   randomSeed(random(100000L) ^ micros());
 
   // 1) Despertar ojitos y parpadear con curiosidad
-  setMatrixBrightness(10);
+  setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
   showRows(ICON_EYES_OPEN);
   if (!waitInteractiveMs(220)) return;
   showRows(ICON_EYES_BLINK);
@@ -799,7 +801,7 @@ void playHandPersonalityGreeting() {
     panSmoothTo(PULSE_CENTER_US, false);
     scrollText(MSG_BUEN_DIA, false, true);
     if (notifCount > 0) return;
-    setMatrixBrightness(10);
+    setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
     showRows(ICON_HAPPY);
     if (!waitInteractiveMs(750)) return;
     clearScreen();
@@ -813,12 +815,13 @@ void playHandPersonalityGreeting() {
   }
   lastCuteGesture = gesture;
 
+  setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
+
   if (gesture == 0) {
     // Gesto 0: Guiño cómplice + pequeña inclinación curiosa de cabeza
     int tiltTarget = (currentPulseUs <= PULSE_CENTER_US)
                        ? min(PULSE_MAX_US, currentPulseUs + 150)
                        : max(PULSE_MIN_US, currentPulseUs - 150);
-    setMatrixBrightness(11);
     showRows(ICON_WINK);
     panSmoothTo(tiltTarget, false);
     if (!waitInteractiveMs(650)) return;
@@ -826,7 +829,6 @@ void playHandPersonalityGreeting() {
     if (!waitInteractiveMs(300)) return;
   } else if (gesture == 1) {
     // Gesto 1: Sonrisa radiante "^_^" + pequeño meneo alegre de cuello
-    setMatrixBrightness(11);
     showRows(ICON_HAPPY);
     int leftNudge  = min(PULSE_MAX_US, PULSE_CENTER_US + 90);
     int rightNudge = max(PULSE_MIN_US, PULSE_CENTER_US - 90);
@@ -835,17 +837,14 @@ void playHandPersonalityGreeting() {
     panSmoothTo(PULSE_CENTER_US, false);
     if (!waitInteractiveMs(650)) return;
   } else {
-    // Gesto 2: Corazoncito latiente "lub-dub" (2 latidos)
+    // Gesto 2: Corazoncito latiente "lub-dub" (2 latidos en brillo 8)
     panSmoothTo(PULSE_CENTER_US, false);
     for (uint8_t beat = 0; beat < 2; beat++) {
-      setMatrixBrightness(6);
       showRows(ICON_HEART_SMALL);
       if (!waitInteractiveMs(130)) return;
-      setMatrixBrightness(14);
       showRows(ICON_HEART_BIG);
       if (!waitInteractiveMs(260)) return;
     }
-    setMatrixBrightness(9);
     showRows(ICON_HAPPY);
     if (!waitInteractiveMs(450)) return;
   }
@@ -858,17 +857,11 @@ void playHandPersonalityGreeting() {
 
 void renderActiveIcon(const NotifItem& item) {
   unsigned long now = millis();
+  setMatrixBrightness(BRIGHTNESS_NOTIF_ICON);
 
   if (item.type == NOTIF_MAIL) {
     showRows(ICON_EMAIL);
-    if (now - lastNotifAnimMs >= 120UL) {
-      lastNotifAnimMs = now;
-      notifAnimStep = (notifAnimStep + 1) % 20;
-      uint8_t tri = (notifAnimStep <= 10) ? notifAnimStep : (20 - notifAnimStep);
-      setMatrixBrightness(2 + tri);
-    }
   } else if (item.type == NOTIF_CHAT) {
-    setMatrixBrightness(9);
     if (lastNotifAnimMs == 0 || now - lastNotifAnimMs >= 420UL) {
       lastNotifAnimMs = now;
       notifAnimStep = (notifAnimStep + 1) % 3;
@@ -882,9 +875,7 @@ void renderActiveIcon(const NotifItem& item) {
     }
   } else if (item.type == NOTIF_MEET) {
     long remMin = currentMeetingRemainingMin(item);
-    // Si la reunión ya inició (o inicia ahora), la aguja del reloj gira más rápido
     unsigned long tickMs = (remMin <= 0) ? 180UL : 340UL;
-    setMatrixBrightness((remMin <= 0) ? 12 : 9);
     if (lastNotifAnimMs == 0 || now - lastNotifAnimMs >= tickMs) {
       lastNotifAnimMs = now;
       notifAnimStep = (notifAnimStep + 1) % 4;
@@ -999,6 +990,7 @@ void loop() {
     }
 
     if (notifNeedsCenterPan || notifNeedsAttentionWiggle) {
+      setMatrixBrightness(BRIGHTNESS_NOTIF_ICON);
       NotifType t = notifQueue[currentNotifIdx].type;
       if (t == NOTIF_MAIL) {
         showRows(ICON_EMAIL);
