@@ -6,11 +6,11 @@ Firmware en **Arduino** y puente de notificaciones en **Python (Windows 11)** pa
 
 ## Características Principales
 
-### 1. Modo Observador Silencioso (Estado de Reposo)
+### 1. Cara Viva Permanente y Seguimiento Orgánico
 - **Ruedas bloqueadas por software (`LOW`)** para uso seguro sobre el escritorio sin desplazarse.
-- **Pantalla LED `8x8` apagada** en reposo para no distraer.
-- **Paneo aleatorio silencioso:** en intervalos aleatorios de **5 a 30 segundos**, el servo del cuello (`D10`) gira suavemente a una posición aleatoria entre `~52°` y `~128°` mediante pulsos manuales a `50 Hz` exactos (`7 µs` por cuadro de `20 ms`), cortando la señal al terminar para eliminar cualquier zumbido mecánico.
-- **Seguimiento vivo de tu mano + ojos direccionales:** cuando acercas la mano (`<= 12 cm`), en vez de mostrar un texto estático, despierta sus ojos (en brillo `8`), engancha tu mano con el sensor ultrasónico (`hasta ~26 cm`) y **gira el cuello siguiéndola en tiempo real** hacia izquierda o derecha mientras **orienta sus ojos en la matriz `8x8` hacia esa misma dirección** (parpadeando de forma natural mientras te observa y despidiéndose con un guiño `O_-` o sonrisa `^_^` cuando retiras la mano).
+- **Cara siempre encendida con parpadeo y transiciones suaves (brillo `8`):** mantiene sus ojos expresivos activos todo el tiempo, con un **párpado progresivo de 4 niveles** (cierra y abre fila por fila cada `2.6` a `5.6 s`, con doble pestañeo ocasional), **deslizamiento horizontal de mirada en 5 pasos (`-2` a `+2`)** píxel a píxel y micro-miradas curiosas en reposo.
+- **Paneo aleatorio con anticipación y frenado suave (`5` a `30 s`):** antes de girar el cuello (`D10`), primero desliza suavemente la mirada hacia ese lado, acelera y frena progresivamente (*ease-in / ease-out* a `50 Hz`) mientras sigue pestañeando, y corta la señal al terminar para eliminar cualquier zumbido mecánico.
+- **Seguimiento vivo de tu mano + ojos direccionales:** cuando acercas la mano (`<= 12 cm`), engancha tu palma (`hasta ~26 cm`) y **gira el cuello siguiéndola en tiempo real** hacia izquierda o derecha mientras desliza sus ojos gradualmente hacia esa dirección; al retirarla se despide con un guiño `O_-` o sonrisa `^_^` y vuelve a abrir suavemente sus ojos.
 - **Reacción al levantarlo de la mesa (`O_o`):** aprovecha los 3 sensores infrarrojos inferiores (`D11, D7, D8`) para detectar al instante si alguien lo alza en el aire, alternando una cara desconcertada **`O_o` / `o_O`** mientras mira a ambos lados, y mostrando una sonrisa **`^_^`** de alivio cuando vuelve a apoyarse sobre el escritorio.
 
 ### 2. Cola de Notificaciones Bluetooth BLE (`DX-BT24`) con Nombre del Remitente

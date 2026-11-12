@@ -1,14 +1,17 @@
 // ============================================================================
 // Keyestudio Smart Little Turtle V3.1
-// Seguimiento Vivo de Mano con Ojos + Levantamiento "O_o" + Cola BLE
+// Cara Viva Permanente + Transiciones Suaves + Seguimiento de Mano + Cola BLE
 // ============================================================================
-// 1) ESTADO DE REPOSO Y SEGUIMIENTO DE MANO:
-//    - Pantalla 8x8 apagada y motores bloqueados en LOW.
-//    - Giro suave aleatorio entre 5 y 30 segundos (~52° a ~128°, 50 Hz).
-//    - Al acercar la mano (<= 12 cm): despierta sus ojos (brillo 8), engancha
-//      tu mano con el sensor ultrasónico y GIRA EL CUELLO SIGUIÉNDOLA hacia
-//      donde la muevas, orientando sus ojos hacia esa misma dirección; al
-//      retirar la mano se despide con un guiño/sonrisa y vuelve al reposo.
+// 1) CARA VIVA PERMANENTE Y SEGUIMIENTO DE MANO:
+//    - Cara siempre activa en brillo 8 (motores bloqueados en LOW).
+//    - Parpadeo orgánico multi-etapa (párpado baja y sube fila por fila cada
+//      2.6~5.6 s, con doble pestañeo ocasional) y micro-miradas suaves.
+//    - Transición gradual de mirada en 5 pasos (-2, -1, 0, +1, +2) y giro de
+//      cuello con aceleración/frenado suave (ease-in / ease-out) cada 5~30 s,
+//      anticipando primero con los ojos hacia dónde va a girar.
+//    - Al acercar la mano (<= 12 cm): sigue tu mano de forma fluida con el
+//      cuello y orienta gradualmente los ojos hacia esa dirección; al retirarla
+//      hace un guiño/sonrisa y reabre suavemente sus ojos sin apagar pantalla.
 //    - Si levantas el robot de la mesa: pone cara "O_o" / "o_O" al instante.
 //
 // 2) COLA DE NOTIFICACIONES BLUETOOTH DX-BT24 (UART 9600 bps en RX/TX):
@@ -109,11 +112,36 @@ bool triggerRemoteBuenDia = false;
 
 int currentPulseUs               = PULSE_CENTER_US;
 unsigned long pauseStartMs       = 0;
-unsigned long nextObservePauseMs = 20000UL;
+unsigned long nextObservePauseMs = 15000UL;
 int8_t lastGoodbyeGesture        = 0;
+
+// --- Estado de Cara Viva Permanente y Animación Suave ---
+uint8_t currentMatrixBrightness  = 255;
+bool faceRenderDirty             = true;
+int8_t currentGaze               = 0;   // -2 (izq total) .. -1 .. 0 (centro) .. +1 .. +2 (der total)
+int8_t targetGaze                = 0;
+int8_t lastRenderedGaze          = 99;
+uint8_t currentLid               = 3;   // 0=abierto, 1=bajando1, 2=bajando2, 3=cerrado
+uint8_t lastRenderedLid          = 99;
+uint8_t blinkSeqStep             = 0;   // 0=inactivo, 1..6=etapas del parpadeo suave
+bool pendingDoubleBlink          = false;
+unsigned long lastGazeStepMs     = 0;
+unsigned long blinkStepStartMs   = 0;
+unsigned long nextBlinkAtMs      = 0;
+unsigned long nextGlanceAtMs     = 0;
+unsigned long glanceReleaseAtMs  = 0;
+bool glanceActive                = false;
 
 unsigned long pickRandomObservePauseMs() {
   return (unsigned long)random(OBSERVE_MIN_MS, OBSERVE_MAX_MS + 1UL);
+}
+
+unsigned long pickRandomBlinkDelayMs() {
+  return (unsigned long)random(2600UL, 5600UL);
+}
+
+unsigned long pickRandomGlanceDelayMs() {
+  return (unsigned long)random(4200UL, 8800UL);
 }
 
 // ============================================================================
@@ -329,6 +357,8 @@ uint8_t getGlyph(uint8_t ch, uint8_t outCols[5]) {
 // --- Funciones de Matriz HT16K33 ---
 void setMatrixBrightness(uint8_t level) {
   if (level > 15) level = 15;
+  if (currentMatrixBrightness == level) return;
+  currentMatrixBrightness = level;
   Wire.beginTransmission(HT16K33_ADDR);
   Wire.write(0xE0 | level);
   Wire.endTransmission();
@@ -344,10 +374,11 @@ void ht16k33Init() {
   Wire.write(0x81);
   Wire.endTransmission();
 
+  currentMatrixBrightness = 255;
   setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
 }
 
-void showRows(const uint8_t rowsTopToBottom[8]) {
+void writeMatrixRowsRaw(const uint8_t rowsTopToBottom[8]) {
   Wire.beginTransmission(HT16K33_ADDR);
   Wire.write(0x00);
   for (int r = 0; r < 8; r++) {
@@ -357,10 +388,146 @@ void showRows(const uint8_t rowsTopToBottom[8]) {
   Wire.endTransmission();
 }
 
+void showRows(const uint8_t rowsTopToBottom[8]) {
+  faceRenderDirty = true;
+  writeMatrixRowsRaw(rowsTopToBottom);
+}
+
 void clearScreen() {
   setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
   const uint8_t empty[8] = {0, 0, 0, 0, 0, 0, 0, 0};
   showRows(empty);
+}
+
+// --- Motor de Cara Viva Permanente (mirada en 5 pasos + párpado en 4 niveles) ---
+void drawLivingFacePixels(int8_t gaze, uint8_t lid) {
+  if (gaze < -2) gaze = -2;
+  if (gaze >  2) gaze =  2;
+  if (lid  >  3) lid  =  3;
+
+  uint8_t eyeCols    = 0x66;
+  uint8_t topRowMask = 0x66;
+  uint8_t mouth      = 0x18;
+
+  if (gaze == -2) {
+    eyeCols    = 0x1B; // x=0,1 y x=3,4 (perspectiva lateral hacia izq)
+    topRowMask = 0x03;
+    mouth      = 0x0C;
+  } else if (gaze == -1) {
+    eyeCols    = 0x33; // paso intermedio suave hacia izq
+    topRowMask = 0x33;
+    mouth      = 0x0C;
+  } else if (gaze == 1) {
+    eyeCols    = 0xCC; // paso intermedio suave hacia der
+    topRowMask = 0xCC;
+    mouth      = 0x30;
+  } else if (gaze == 2) {
+    eyeCols    = 0xD8; // x=3,4 y x=6,7 (perspectiva lateral hacia der)
+    topRowMask = 0xC0;
+    mouth      = 0x30;
+  }
+
+  uint8_t rows[8];
+  rows[0] = 0x00;
+  rows[1] = (lid == 0) ? topRowMask : 0x00;
+  rows[2] = (lid <= 1) ? eyeCols    : 0x00;
+  rows[3] = eyeCols; // Línea de pestañas cuando el ojo se cierra en lid == 3
+  rows[4] = (lid <= 2) ? eyeCols    : 0x00;
+  rows[5] = 0x00;
+  rows[6] = mouth;
+  rows[7] = 0x00;
+
+  setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
+  writeMatrixRowsRaw(rows);
+  lastRenderedGaze = gaze;
+  lastRenderedLid  = lid;
+  faceRenderDirty  = false;
+}
+
+void resumeLivingFaceSmooth(int8_t desiredGaze = 0) {
+  unsigned long now  = millis();
+  targetGaze         = desiredGaze;
+  glanceActive       = false;
+  pendingDoubleBlink = false;
+  // Reabrir suavemente los párpados (3 -> 2 -> 1 -> 0) al volver de cualquier gesto/texto
+  currentLid         = 3;
+  blinkSeqStep       = 3;
+  blinkStepStartMs   = now;
+  lastGazeStepMs     = now;
+  nextBlinkAtMs      = now + pickRandomBlinkDelayMs();
+  nextGlanceAtMs     = now + pickRandomGlanceDelayMs();
+  faceRenderDirty    = true;
+  drawLivingFacePixels(currentGaze, currentLid);
+}
+
+void setTargetGazeExplicit(int8_t gaze) {
+  if (gaze < -2) gaze = -2;
+  if (gaze >  2) gaze =  2;
+  glanceActive = false;
+  targetGaze   = gaze;
+}
+
+void updateLivingFace(bool allowIdleGlances) {
+  unsigned long now = millis();
+
+  if (allowIdleGlances) {
+    if (glanceActive && now >= glanceReleaseAtMs) {
+      glanceActive   = false;
+      targetGaze     = 0;
+      nextGlanceAtMs = now + pickRandomGlanceDelayMs();
+    } else if (!glanceActive && blinkSeqStep == 0 && now >= nextGlanceAtMs) {
+      glanceActive      = true;
+      targetGaze        = (random(0, 2) == 0) ? -1 : 1;
+      glanceReleaseAtMs = now + (unsigned long)random(900UL, 1800UL);
+    }
+  }
+
+  // Deslizamiento gradual de la mirada (60 ms por paso: -2 <-> -1 <-> 0 <-> +1 <-> +2)
+  if (currentGaze != targetGaze && (now - lastGazeStepMs >= 60UL)) {
+    lastGazeStepMs = now;
+    currentGaze += (targetGaze > currentGaze) ? 1 : -1;
+  }
+
+  // Cortina suave del párpado superior (0 -> 1 -> 2 -> 3 -> 2 -> 1 -> 0)
+  if (blinkSeqStep == 0) {
+    if (now >= nextBlinkAtMs) {
+      blinkSeqStep     = 1;
+      currentLid       = 1;
+      blinkStepStartMs = now;
+      if (!pendingDoubleBlink) {
+        pendingDoubleBlink = (random(0, 100) < 20);
+      }
+    }
+  } else if (blinkSeqStep == 1 && (now - blinkStepStartMs >= 28UL)) {
+    blinkSeqStep     = 2;
+    currentLid       = 2;
+    blinkStepStartMs = now;
+  } else if (blinkSeqStep == 2 && (now - blinkStepStartMs >= 28UL)) {
+    blinkSeqStep     = 3;
+    currentLid       = 3;
+    blinkStepStartMs = now;
+  } else if (blinkSeqStep == 3 && (now - blinkStepStartMs >= 52UL)) {
+    blinkSeqStep     = 4;
+    currentLid       = 2;
+    blinkStepStartMs = now;
+  } else if (blinkSeqStep == 4 && (now - blinkStepStartMs >= 32UL)) {
+    blinkSeqStep     = 5;
+    currentLid       = 1;
+    blinkStepStartMs = now;
+  } else if (blinkSeqStep == 5 && (now - blinkStepStartMs >= 32UL)) {
+    blinkSeqStep = 0;
+    currentLid   = 0;
+    if (pendingDoubleBlink) {
+      pendingDoubleBlink = false;
+      nextBlinkAtMs      = now + 145UL;
+    } else {
+      nextBlinkAtMs      = now + pickRandomBlinkDelayMs();
+    }
+  }
+
+  if (faceRenderDirty || currentGaze != lastRenderedGaze || currentLid != lastRenderedLid) {
+    drawLivingFacePixels(currentGaze, currentLid);
+  }
 }
 
 // --- Lectura Ultrasónica rápida (proximidad <= 10 cm) ---
@@ -497,7 +664,7 @@ void handleLiftedReaction() {
   }
 
   if (notifCount == 0) {
-    clearScreen();
+    resumeLivingFaceSmooth(0);
     pauseStartMs       = millis();
     nextObservePauseMs = pickRandomObservePauseMs();
   } else {
@@ -622,7 +789,7 @@ void processBluetoothLine(char* line) {
   } else if (cmd == 'X' || cmd == 'x') {
     notifCount = 0;
     currentNotifIdx = 0;
-    clearScreen();
+    resumeLivingFaceSmooth(0);
     Serial.println(F("OK:CLR"));
   } else if (cmd == 'B' || cmd == 'b') {
     triggerRemoteBuenDia = true;
@@ -737,7 +904,7 @@ void dismissCurrentNotification() {
     notifAnimStep   = 0;
   } else {
     currentNotifIdx    = 0;
-    clearScreen();
+    resumeLivingFaceSmooth(0);
     pauseStartMs       = millis();
     nextObservePauseMs = pickRandomObservePauseMs();
   }
@@ -754,8 +921,36 @@ int pickRandomTargetUs() {
   return candidate;
 }
 
-bool panSmoothTo(int targetPulseUs, bool stopOnNear = true) {
-  int nearHits = 0;
+int computeEasedStep(int traveledUs, int remainingUs, int minStep, int maxStep) {
+  int rampIn  = minStep + (traveledUs / 32);
+  int rampOut = minStep + (remainingUs / 26);
+  int step    = (rampIn < rampOut) ? rampIn : rampOut;
+  if (step > maxStep) step = maxStep;
+  if (step < minStep) step = minStep;
+  return step;
+}
+
+bool panSmoothTo(int targetPulseUs, bool stopOnNear = true, bool animateFace = false) {
+  int nearHits     = 0;
+  int startPulseUs = currentPulseUs;
+
+  // Anticipación natural: primero desliza suavemente los ojos hacia el lado al que va a girar
+  if (animateFace && abs(targetPulseUs - currentPulseUs) >= 90) {
+    int8_t turnGaze = (targetPulseUs > currentPulseUs) ? 2 : -2;
+    setTargetGazeExplicit(turnGaze);
+    unsigned long antStart = millis();
+    while (millis() - antStart < 135UL) {
+      pollBluetooth();
+      if (stopOnNear && (notifCount > 0 || !rawSensorsOnDesk())) {
+        return false;
+      }
+      updateLivingFace(false);
+      if (stopOnNear && readDistanceFastCm() <= TRACK_START_CM) {
+        return true;
+      }
+      delay(16);
+    }
+  }
 
   while (currentPulseUs != targetPulseUs) {
     unsigned long frameStartUs = micros();
@@ -766,21 +961,30 @@ bool panSmoothTo(int targetPulseUs, bool stopOnNear = true) {
       return false;
     }
 
-    int diff = targetPulseUs - currentPulseUs;
-    if (abs(diff) <= PULSE_STEP_US) {
+    int diff    = targetPulseUs - currentPulseUs;
+    int absDiff = abs(diff);
+    int stepUs  = animateFace
+                  ? computeEasedStep(abs(currentPulseUs - startPulseUs), absDiff, 3, 8)
+                  : computeEasedStep(abs(currentPulseUs - startPulseUs), absDiff, 4, 9);
+
+    if (absDiff <= stepUs) {
       currentPulseUs = targetPulseUs;
     } else if (diff > 0) {
-      currentPulseUs += PULSE_STEP_US;
+      currentPulseUs += stepUs;
     } else {
-      currentPulseUs -= PULSE_STEP_US;
+      currentPulseUs -= stepUs;
     }
 
     digitalWrite(SERVO_PIN, HIGH);
     delayMicroseconds(currentPulseUs);
     digitalWrite(SERVO_PIN, LOW);
 
+    if (animateFace) {
+      updateLivingFace(false);
+    }
+
     if (stopOnNear) {
-      if (readDistanceFastCm() <= NEAR_DETECT_CM) {
+      if (readDistanceFastCm() <= TRACK_START_CM) {
         nearHits++;
         if (nearHits >= 2) {
           digitalWrite(SERVO_PIN, LOW);
@@ -802,6 +1006,12 @@ bool panSmoothTo(int targetPulseUs, bool stopOnNear = true) {
   }
 
   digitalWrite(SERVO_PIN, LOW);
+
+  // Al terminar el giro, sostiene un instante la mirada lateral y luego regresa suave al centro
+  if (animateFace) {
+    glanceActive      = true;
+    glanceReleaseAtMs = millis() + 280UL;
+  }
   return false;
 }
 
@@ -821,7 +1031,7 @@ bool waitInteractiveMs(unsigned long ms) {
   return true;
 }
 
-// --- Seguimiento activo de tu mano con el cuello + ojos direccionales ---
+// --- Seguimiento activo de tu mano con el cuello + ojos con transición suave ---
 enum TrackState : uint8_t {
   TRK_LOCKED    = 0,
   TRK_PROBE_1   = 1,
@@ -829,36 +1039,15 @@ enum TrackState : uint8_t {
   TRK_CENTERING = 3
 };
 
-void showTrackingEyes(int8_t gazeDir, bool blinking) {
-  setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
-  if (blinking) {
-    showRows(ICON_TRACK_BLINK);
-  } else if (gazeDir < 0) {
-    showRows(ICON_TRACK_LEFT);
-  } else if (gazeDir > 0) {
-    showRows(ICON_TRACK_RIGHT);
-  } else {
-    showRows(ICON_TRACK_CENTER);
-  }
-}
-
 void trackHandWithEyes() {
-  setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
-
-  // Despertar rápido con un parpadeo al detectar tu mano
-  showRows(ICON_TRACK_CENTER);
-  if (!waitInteractiveMs(120)) return;
-  showRows(ICON_TRACK_BLINK);
-  if (!waitInteractiveMs(75)) return;
-  showRows(ICON_TRACK_CENTER);
-
+  // Como la cara ya está encendida en reposo, engancha fluido sin saltos bruscos
   TrackState state       = TRK_LOCKED;
-  int8_t trackDir        = 1;   // +1 = hacia PULSE_MAX_US (ICON_TRACK_RIGHT), -1 = hacia PULSE_MIN_US (ICON_TRACK_LEFT)
-  int8_t activeGaze      = 0;
+  int8_t trackDir        = 1;   // +1 = hacia PULSE_MAX_US (mirada +2), -1 = hacia PULSE_MIN_US (mirada -2)
+  int8_t desiredGaze     = 0;
   uint8_t gazeHoldFrames = 0;
   uint8_t centerFrames   = 0;
+  int curTrackStepUs     = 5;
   int sweepStartUs       = currentPulseUs;
-  unsigned long lastBlinkMs = millis();
 
   while (true) {
     unsigned long frameStartUs = micros();
@@ -874,27 +1063,31 @@ void trackHandWithEyes() {
       return;
     }
 
-    float dist = readTrackDistanceCm();
-    bool handSeen = (dist <= TRACK_HOLD_CM);
+    float dist      = readTrackDistanceCm();
+    bool handSeen   = (dist <= TRACK_HOLD_CM);
     bool movedServo = false;
 
     if (state == TRK_LOCKED) {
+      curTrackStepUs = 5;
       if (handSeen) {
-        // Mano frente a sus ojos: mantener servo quieto sin ruido
         if (gazeHoldFrames > 0) {
           gazeHoldFrames--;
-        } else if (currentPulseUs < 1200) {
-          activeGaze = -1;
-        } else if (currentPulseUs > 1780) {
-          activeGaze = 1;
+        } else if (currentPulseUs < 1180) {
+          desiredGaze = -2;
+        } else if (currentPulseUs < 1350) {
+          desiredGaze = -1;
+        } else if (currentPulseUs > 1800) {
+          desiredGaze = 2;
+        } else if (currentPulseUs > 1630) {
+          desiredGaze = 1;
         } else {
-          activeGaze = 0;
+          desiredGaze = 0;
         }
       } else {
-        // Tu mano se desplazó hacia un costado -> salir a buscarla en la dirección de inercia
-        state        = TRK_PROBE_1;
-        sweepStartUs = currentPulseUs;
-        activeGaze   = trackDir;
+        state          = TRK_PROBE_1;
+        sweepStartUs   = currentPulseUs;
+        curTrackStepUs = 5;
+        desiredGaze    = (trackDir > 0) ? 2 : -2;
       }
     }
 
@@ -902,57 +1095,64 @@ void trackHandWithEyes() {
       if (handSeen) {
         state          = TRK_CENTERING;
         centerFrames   = 4;
-        activeGaze     = trackDir;
+        desiredGaze    = (trackDir > 0) ? 2 : -2;
         gazeHoldFrames = 10;
       } else {
-        int nextUs = currentPulseUs + (int)trackDir * TRACK_STEP_US;
-        bool hitLimit = (nextUs < TRACK_PULSE_MIN_US || nextUs > TRACK_PULSE_MAX_US);
+        if (curTrackStepUs < TRACK_STEP_US) {
+          curTrackStepUs += 2;
+          if (curTrackStepUs > TRACK_STEP_US) curTrackStepUs = TRACK_STEP_US;
+        }
+        int nextUs      = currentPulseUs + (int)trackDir * curTrackStepUs;
+        bool hitLimit   = (nextUs < TRACK_PULSE_MIN_US || nextUs > TRACK_PULSE_MAX_US);
         bool sweptEnough = (abs(nextUs - sweepStartUs) >= 240);
 
         if (hitLimit || sweptEnough) {
-          // No estaba de este lado -> invertir mirada y cuello hacia el otro lado al instante
-          trackDir   = -trackDir;
-          activeGaze = trackDir;
-          state      = TRK_PROBE_2;
+          trackDir       = -trackDir;
+          curTrackStepUs = 5;
+          desiredGaze    = (trackDir > 0) ? 2 : -2;
+          state          = TRK_PROBE_2;
         } else {
           currentPulseUs = nextUs;
           movedServo     = true;
-          activeGaze     = trackDir;
+          desiredGaze    = (trackDir > 0) ? 2 : -2;
         }
       }
     } else if (state == TRK_PROBE_2) {
       if (handSeen) {
         state          = TRK_CENTERING;
         centerFrames   = 4;
-        activeGaze     = trackDir;
+        desiredGaze    = (trackDir > 0) ? 2 : -2;
         gazeHoldFrames = 10;
       } else {
-        int nextUs = currentPulseUs + (int)trackDir * TRACK_STEP_US;
-        bool hitLimit = (nextUs < TRACK_PULSE_MIN_US || nextUs > TRACK_PULSE_MAX_US);
+        if (curTrackStepUs < TRACK_STEP_US) {
+          curTrackStepUs += 2;
+          if (curTrackStepUs > TRACK_STEP_US) curTrackStepUs = TRACK_STEP_US;
+        }
+        int nextUs         = currentPulseUs + (int)trackDir * curTrackStepUs;
+        bool hitLimit      = (nextUs < TRACK_PULSE_MIN_US || nextUs > TRACK_PULSE_MAX_US);
         bool sweptOtherSide = (abs(nextUs - sweepStartUs) >= 340);
 
         if (hitLimit || sweptOtherSide) {
-          // Ya revisó ambos lados y retiraste la mano -> despedirse simpático y salir
           break;
         } else {
           currentPulseUs = nextUs;
           movedServo     = true;
-          activeGaze     = trackDir;
+          desiredGaze    = (trackDir > 0) ? 2 : -2;
         }
       }
     } else if (state == TRK_CENTERING) {
-      // Avanzar unos pocos grados dentro del cono para quedar centrado en tu palma
       if (handSeen && centerFrames > 0) {
-        int nextUs = currentPulseUs + (int)trackDir * TRACK_STEP_US;
+        int stepC  = 7;
+        int nextUs = currentPulseUs + (int)trackDir * stepC;
         if (nextUs >= TRACK_PULSE_MIN_US && nextUs <= TRACK_PULSE_MAX_US) {
           currentPulseUs = nextUs;
           movedServo     = true;
         }
         centerFrames--;
-        activeGaze = trackDir;
+        desiredGaze = (trackDir > 0) ? 1 : -1;
       } else {
         state          = TRK_LOCKED;
-        gazeHoldFrames = 10;
+        gazeHoldFrames = 8;
       }
     }
 
@@ -962,17 +1162,8 @@ void trackHandWithEyes() {
       digitalWrite(SERVO_PIN, LOW);
     }
 
-    // Parpadeo natural cada ~3.2 s mientras sigue tu mano
-    unsigned long nowMs = millis();
-    bool blinking = false;
-    if (nowMs - lastBlinkMs >= 3200UL) {
-      blinking = true;
-      if (nowMs - lastBlinkMs >= 3290UL) {
-        lastBlinkMs = nowMs;
-        blinking = false;
-      }
-    }
-    showTrackingEyes(activeGaze, blinking);
+    setTargetGazeExplicit(desiredGaze);
+    updateLivingFace(false);
 
     unsigned long elapsedUs = micros() - frameStartUs;
     if (elapsedUs < 20000UL) {
@@ -998,7 +1189,7 @@ void trackHandWithEyes() {
   if (!waitInteractiveMs(650)) return;
 
   if (notifCount == 0) {
-    clearScreen();
+    resumeLivingFaceSmooth(0);
   }
 }
 
@@ -1096,20 +1287,24 @@ void setup() {
   Serial.begin(9600);
   ht16k33Init();
   clearScreen();
+  resumeLivingFaceSmooth(0);
 
   for (int i = 0; i < 6; i++) {
     digitalWrite(SERVO_PIN, HIGH);
     delayMicroseconds(currentPulseUs);
     digitalWrite(SERVO_PIN, LOW);
+    updateLivingFace(false);
     delay(20);
   }
-  panSmoothTo(pickRandomTargetUs(), false);
+  panSmoothTo(pickRandomTargetUs(), false, true);
 
   pauseStartMs       = millis();
   nextObservePauseMs = pickRandomObservePauseMs();
 }
 
 void loop() {
+  static unsigned long lastIdleSonarMs = 0;
+
   stopMotors();
   pollBluetooth();
 
@@ -1122,7 +1317,9 @@ void loop() {
   if (triggerRemoteBuenDia && notifCount == 0) {
     triggerRemoteBuenDia = false;
     scrollText(MSG_BUEN_DIA, false, true);
-    clearScreen();
+    if (notifCount == 0) {
+      resumeLivingFaceSmooth(0);
+    }
     pauseStartMs       = millis();
     nextObservePauseMs = pickRandomObservePauseMs();
     return;
@@ -1150,12 +1347,12 @@ void loop() {
       if (notifNeedsAttentionWiggle) {
         notifNeedsAttentionWiggle = false;
         notifNeedsCenterPan       = false;
-        panSmoothTo(PULSE_CENTER_US - 95, false);
-        panSmoothTo(PULSE_CENTER_US + 95, false);
-        panSmoothTo(PULSE_CENTER_US, false);
+        panSmoothTo(PULSE_CENTER_US - 95, false, false);
+        panSmoothTo(PULSE_CENTER_US + 95, false, false);
+        panSmoothTo(PULSE_CENTER_US, false, false);
       } else {
         notifNeedsCenterPan = false;
-        panSmoothTo(PULSE_CENTER_US, false);
+        panSmoothTo(PULSE_CENTER_US, false, false);
       }
       phaseStartMs    = millis();
       lastNotifAnimMs = 0;
@@ -1198,23 +1395,30 @@ void loop() {
       phaseStartMs    = millis();
       lastNotifAnimMs = 0;
       notifAnimStep   = 0;
+    } else {
+      resumeLivingFaceSmooth(0);
     }
     return;
   }
 
   // ==========================================================================
-  // ESTADO DE REPOSO (Pantalla oscura + Seguimiento de mano + Giro 10~30 s)
+  // ESTADO VIVO PERMANENTE (Cara encendida + Pestañeo suave + Giro 5~30 s)
   // ==========================================================================
-  if (isHandReadyToTrack()) {
-    trackHandWithEyes();
-    pauseStartMs       = millis();
-    nextObservePauseMs = pickRandomObservePauseMs();
-    return;
+  updateLivingFace(true);
+
+  if (millis() - lastIdleSonarMs >= 55UL) {
+    lastIdleSonarMs = millis();
+    if (isHandReadyToTrack()) {
+      trackHandWithEyes();
+      pauseStartMs       = millis();
+      nextObservePauseMs = pickRandomObservePauseMs();
+      return;
+    }
   }
 
   if (millis() - pauseStartMs >= nextObservePauseMs) {
     int randomTargetUs = pickRandomTargetUs();
-    bool spottedSomeone = panSmoothTo(randomTargetUs, true);
+    bool spottedSomeone = panSmoothTo(randomTargetUs, true, true);
 
     if (spottedSomeone && notifCount == 0) {
       trackHandWithEyes();
@@ -1222,7 +1426,8 @@ void loop() {
 
     pauseStartMs       = millis();
     nextObservePauseMs = pickRandomObservePauseMs();
+    return;
   }
 
-  delay(50);
+  delay(16);
 }
