@@ -1,0 +1,12 @@
+# Logs, lanzador local autogenerado y cachés de Python
+*.log
+lanzar_silencioso.vbs
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Compilaciones temporales de Arduino
+build/
+*.hex
+*.elf
