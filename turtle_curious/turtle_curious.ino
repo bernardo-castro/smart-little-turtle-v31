@@ -101,6 +101,8 @@ bool triggerRemoteBuenDia = false;
 int currentPulseUs               = PULSE_CENTER_US;
 unsigned long pauseStartMs       = 0;
 unsigned long nextObservePauseMs = 25000UL;
+bool hasSaidBuenDia              = false;
+uint8_t lastCuteGesture          = 255;
 
 unsigned long pickRandomObservePauseMs() {
   return (unsigned long)random(OBSERVE_MIN_MS, OBSERVE_MAX_MS + 1UL);
@@ -156,9 +158,30 @@ const uint8_t ICON_LIFT_oO[8] = {
   0x00, 0x60, 0x90, 0x96, 0x66, 0x00, 0x3C, 0x00
 };
 
-// Carita feliz "^_^" de alivio cuando vuelve a apoyarse en la mesa
+// Carita feliz "^_^" de alivio / alegría
 const uint8_t ICON_HAPPY[8] = {
   0x00, 0x42, 0xA5, 0x00, 0x00, 0x42, 0x3C, 0x00
+};
+
+// Repertorio expresivo Opción A (ojitos despiertos, parpadeo, guiño y corazón latiente)
+const uint8_t ICON_EYES_OPEN[8] = {
+  0x00, 0x66, 0xE7, 0xE7, 0x66, 0x00, 0x18, 0x00
+};
+
+const uint8_t ICON_EYES_BLINK[8] = {
+  0x00, 0x00, 0x00, 0xE7, 0x00, 0x00, 0x18, 0x00
+};
+
+const uint8_t ICON_WINK[8] = {
+  0x00, 0x06, 0x07, 0xE7, 0x06, 0x40, 0x3C, 0x00
+};
+
+const uint8_t ICON_HEART_BIG[8] = {
+  0x00, 0x66, 0xFF, 0xFF, 0x7E, 0x3C, 0x18, 0x00
+};
+
+const uint8_t ICON_HEART_SMALL[8] = {
+  0x00, 0x00, 0x24, 0x7E, 0x3C, 0x18, 0x00, 0x00
 };
 
 // ============================================================================
@@ -736,6 +759,103 @@ bool panSmoothTo(int targetPulseUs, bool stopOnNear = true) {
   return false;
 }
 
+bool waitInteractiveMs(unsigned long ms) {
+  unsigned long t0 = millis();
+  while (millis() - t0 < ms) {
+    pollBluetooth();
+    if (isRobotLifted()) {
+      handleLiftedReaction();
+      return false;
+    }
+    if (notifCount > 0) {
+      return false;
+    }
+    delay(20);
+  }
+  return true;
+}
+
+// --- Opción A: Primera vez "Buen día!", luego repertorio vivo de gestos ---
+void playHandPersonalityGreeting() {
+  digitalWrite(SERVO_PIN, LOW);
+  randomSeed(random(100000L) ^ micros());
+
+  // 1) Despertar ojitos y parpadear con curiosidad
+  setMatrixBrightness(10);
+  showRows(ICON_EYES_OPEN);
+  if (!waitInteractiveMs(220)) return;
+  showRows(ICON_EYES_BLINK);
+  if (!waitInteractiveMs(85)) return;
+  showRows(ICON_EYES_OPEN);
+  if (!waitInteractiveMs(180)) return;
+  showRows(ICON_EYES_BLINK);
+  if (!waitInteractiveMs(85)) return;
+  showRows(ICON_EYES_OPEN);
+  if (!waitInteractiveMs(220)) return;
+
+  // 2) La primera vez tras encenderse saluda con "Buen día!" + sonrisa
+  if (!hasSaidBuenDia) {
+    hasSaidBuenDia = true;
+    panSmoothTo(PULSE_CENTER_US, false);
+    scrollText(MSG_BUEN_DIA, false, true);
+    if (notifCount > 0) return;
+    setMatrixBrightness(10);
+    showRows(ICON_HAPPY);
+    if (!waitInteractiveMs(750)) return;
+    clearScreen();
+    return;
+  }
+
+  // 3) Siguientes veces: elegir gesto simpático al azar sin repetir el anterior
+  uint8_t gesture = (uint8_t)random(0, 3);
+  if (gesture == lastCuteGesture) {
+    gesture = (gesture + 1) % 3;
+  }
+  lastCuteGesture = gesture;
+
+  if (gesture == 0) {
+    // Gesto 0: Guiño cómplice + pequeña inclinación curiosa de cabeza
+    int tiltTarget = (currentPulseUs <= PULSE_CENTER_US)
+                       ? min(PULSE_MAX_US, currentPulseUs + 150)
+                       : max(PULSE_MIN_US, currentPulseUs - 150);
+    setMatrixBrightness(11);
+    showRows(ICON_WINK);
+    panSmoothTo(tiltTarget, false);
+    if (!waitInteractiveMs(650)) return;
+    showRows(ICON_EYES_OPEN);
+    if (!waitInteractiveMs(300)) return;
+  } else if (gesture == 1) {
+    // Gesto 1: Sonrisa radiante "^_^" + pequeño meneo alegre de cuello
+    setMatrixBrightness(11);
+    showRows(ICON_HAPPY);
+    int leftNudge  = min(PULSE_MAX_US, PULSE_CENTER_US + 90);
+    int rightNudge = max(PULSE_MIN_US, PULSE_CENTER_US - 90);
+    panSmoothTo(leftNudge, false);
+    panSmoothTo(rightNudge, false);
+    panSmoothTo(PULSE_CENTER_US, false);
+    if (!waitInteractiveMs(650)) return;
+  } else {
+    // Gesto 2: Corazoncito latiente "lub-dub" (2 latidos)
+    panSmoothTo(PULSE_CENTER_US, false);
+    for (uint8_t beat = 0; beat < 2; beat++) {
+      setMatrixBrightness(6);
+      showRows(ICON_HEART_SMALL);
+      if (!waitInteractiveMs(130)) return;
+      setMatrixBrightness(14);
+      showRows(ICON_HEART_BIG);
+      if (!waitInteractiveMs(260)) return;
+    }
+    setMatrixBrightness(9);
+    showRows(ICON_HAPPY);
+    if (!waitInteractiveMs(450)) return;
+  }
+
+  if (notifCount == 0) {
+    clearScreen();
+    delay(450);
+  }
+}
+
 void renderActiveIcon(const NotifItem& item) {
   unsigned long now = millis();
 
@@ -944,16 +1064,10 @@ void loop() {
   }
 
   // ==========================================================================
-  // ESTADO DE REPOSO (Pantalla oscura + "Buen día!" <= 10 cm + Giro 20~30 s)
+  // ESTADO DE REPOSO (Pantalla oscura + Gestos <= 10 cm + Giro 20~30 s)
   // ==========================================================================
   if (isSomeoneNear()) {
-    digitalWrite(SERVO_PIN, LOW);
-    randomSeed(random(100000L) ^ micros());
-    scrollText(MSG_BUEN_DIA, false, true);
-    if (notifCount == 0) {
-      clearScreen();
-      delay(600);
-    }
+    playHandPersonalityGreeting();
     pauseStartMs       = millis();
     nextObservePauseMs = pickRandomObservePauseMs();
     return;
@@ -964,11 +1078,7 @@ void loop() {
     bool spottedSomeone = panSmoothTo(randomTargetUs, true);
 
     if (spottedSomeone && notifCount == 0) {
-      scrollText(MSG_BUEN_DIA, false, true);
-      if (notifCount == 0) {
-        clearScreen();
-        delay(600);
-      }
+      playHandPersonalityGreeting();
     }
 
     pauseStartMs       = millis();
