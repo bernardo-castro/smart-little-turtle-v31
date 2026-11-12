@@ -50,6 +50,12 @@ const int   TRIG_PIN       = 12;
 const int   ECHO_PIN       = 13;
 const float NEAR_DETECT_CM = 10.0f;
 
+// --- Sensores Infrarrojos Inferiores (detector de levantamiento de la mesa) ---
+const int LINE_L_PIN = 11;
+const int LINE_M_PIN = 7;
+const int LINE_R_PIN = 8;
+bool deskCalibrated  = false;
+
 // --- Matriz 8x8 HT16K33 (I2C 0x70) ---
 const uint8_t HT16K33_ADDR = 0x70;
 
@@ -139,6 +145,20 @@ const uint8_t ICON_MEET_3[8] = {
 
 const uint8_t ICON_CHECK[8] = {
   0x00, 0x80, 0xC0, 0x60, 0x31, 0x1B, 0x0E, 0x04
+};
+
+// Carita sorprendida/desconcertada "O_o" y "o_O" cuando lo levantan del escritorio
+const uint8_t ICON_LIFT_Oo[8] = {
+  0x00, 0x06, 0x09, 0x69, 0x66, 0x00, 0x3C, 0x00
+};
+
+const uint8_t ICON_LIFT_oO[8] = {
+  0x00, 0x60, 0x90, 0x96, 0x66, 0x00, 0x3C, 0x00
+};
+
+// Carita feliz "^_^" de alivio cuando vuelve a apoyarse en la mesa
+const uint8_t ICON_HAPPY[8] = {
+  0x00, 0x42, 0xA5, 0x00, 0x00, 0x42, 0x3C, 0x00
 };
 
 // ============================================================================
@@ -332,6 +352,92 @@ bool isSomeoneNear() {
   return (d2 <= NEAR_DETECT_CM + 1.5f);
 }
 
+// --- Detección de levantamiento mediante los 3 sensores IR inferiores ---
+bool rawSensorsOnDesk() {
+  // Sobre la mesa al menos uno refleja luz IR (LOW = 0); en el aire los 3 dan HIGH (1/1/1)
+  return (digitalRead(LINE_L_PIN) == LOW ||
+          digitalRead(LINE_M_PIN) == LOW ||
+          digitalRead(LINE_R_PIN) == LOW);
+}
+
+bool isRobotLifted() {
+  if (rawSensorsOnDesk()) {
+    deskCalibrated = true;
+    return false;
+  }
+  if (!deskCalibrated) {
+    return false;
+  }
+  delay(12);
+  return !rawSensorsOnDesk();
+}
+
+void pulseServoOnce(int pulseUs) {
+  digitalWrite(SERVO_PIN, HIGH);
+  delayMicroseconds(pulseUs);
+  digitalWrite(SERVO_PIN, LOW);
+}
+
+void handleLiftedReaction() {
+  // Mostrar de inmediato "O_o" con brillo alto y mirar desconcertado a ambos lados
+  setMatrixBrightness(12);
+  showRows(ICON_LIFT_Oo);
+
+  const int lookLeft  = PULSE_CENTER_US + 180;
+  const int lookRight = PULSE_CENTER_US - 180;
+
+  // Pequeña sacudida curiosa de cabeza si sigue en el aire
+  int targets[3] = {lookRight, lookLeft, PULSE_CENTER_US};
+  for (uint8_t t = 0; t < 3 && !rawSensorsOnDesk(); t++) {
+    while (currentPulseUs != targets[t] && !rawSensorsOnDesk()) {
+      unsigned long f0 = micros();
+      pollBluetooth();
+      int diff = targets[t] - currentPulseUs;
+      if (abs(diff) <= 10) currentPulseUs = targets[t];
+      else currentPulseUs += (diff > 0) ? 10 : -10;
+      pulseServoOnce(currentPulseUs);
+      if (((millis() / 420UL) % 2UL) == 0UL) showRows(ICON_LIFT_Oo);
+      else showRows(ICON_LIFT_oO);
+      unsigned long el = micros() - f0;
+      if (el < 20000UL) {
+        delay((20000UL - el) / 1000UL);
+        delayMicroseconds((20000UL - el) % 1000UL);
+      }
+    }
+  }
+  digitalWrite(SERVO_PIN, LOW);
+
+  // Mantener alternando "O_o" <-> "o_O" todo el tiempo que permanezca levantado
+  while (!rawSensorsOnDesk()) {
+    pollBluetooth();
+    if (((millis() / 450UL) % 2UL) == 0UL) {
+      showRows(ICON_LIFT_Oo);
+    } else {
+      showRows(ICON_LIFT_oO);
+    }
+    delay(40);
+  }
+
+  // Al apoyarlo de vuelta en la mesa: carita feliz "^_^" de alivio
+  setMatrixBrightness(9);
+  showRows(ICON_HAPPY);
+  unsigned long tBack = millis();
+  while (millis() - tBack < 900UL) {
+    pollBluetooth();
+    delay(30);
+  }
+
+  if (notifCount == 0) {
+    clearScreen();
+    pauseStartMs       = millis();
+    nextObservePauseMs = pickRandomObservePauseMs();
+  } else {
+    notifPhase      = PHASE_ICON;
+    phaseStartMs    = millis();
+    lastNotifAnimMs = 0;
+  }
+}
+
 long currentMeetingRemainingMin(const NotifItem& item) {
   long elapsedMin = (long)((millis() - item.rxMillis) / 60000UL);
   return (long)item.startOffsetMin - elapsedMin;
@@ -491,6 +597,10 @@ bool scrollText(const char* text, bool abortOnNear, bool abortOnNewNotifWhenIdle
   for (int offset = -7; offset <= totalCols; offset++) {
     pollBluetooth();
 
+    if (isRobotLifted()) {
+      handleLiftedReaction();
+      return false;
+    }
     if (abortOnNewNotifWhenIdle && notifCount > 0) {
       return false;
     }
@@ -582,7 +692,7 @@ bool panSmoothTo(int targetPulseUs, bool stopOnNear = true) {
     unsigned long frameStartUs = micros();
 
     pollBluetooth();
-    if (stopOnNear && notifCount > 0) {
+    if (stopOnNear && (notifCount > 0 || !rawSensorsOnDesk())) {
       digitalWrite(SERVO_PIN, LOW);
       return false;
     }
@@ -718,6 +828,11 @@ void setup() {
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
 
+  pinMode(LINE_L_PIN, INPUT);
+  pinMode(LINE_M_PIN, INPUT);
+  pinMode(LINE_R_PIN, INPUT);
+  deskCalibrated = rawSensorsOnDesk();
+
   randomSeed((unsigned long)analogRead(A0) ^ ((unsigned long)analogRead(A1) << 8) ^ micros());
 
   Serial.begin(9600);
@@ -739,6 +854,12 @@ void setup() {
 void loop() {
   stopMotors();
   pollBluetooth();
+
+  // Si alguien levanta el robot de la mesa -> carita "O_o" / "o_O" inmediata
+  if (isRobotLifted()) {
+    handleLiftedReaction();
+    return;
+  }
 
   if (triggerRemoteBuenDia && notifCount == 0) {
     triggerRemoteBuenDia = false;

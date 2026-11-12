@@ -11,6 +11,7 @@ Firmware en **Arduino** y puente de notificaciones en **Python (Windows 11)** pa
 - **Pantalla LED `8x8` apagada** en reposo para no distraer.
 - **Paneo aleatorio silencioso:** en intervalos aleatorios de **20 a 30 segundos**, el servo del cuello (`D10`) gira suavemente a una posición aleatoria entre `~52°` y `~128°` mediante pulsos manuales a `50 Hz` exactos (`7 µs` por cuadro de `20 ms`), cortando la señal al terminar para eliminar cualquier zumbido mecánico.
 - **Saludo por proximidad corta:** cuando el sensor ultrasónico (`HC-SR04`) detecta que pasas la mano bien cerca (`<= 10 cm`), desplaza el texto **`"Buen día!"`** de derecha a izquierda en la matriz `8x8` y vuelve al reposo (evitando activaciones accidentales a media distancia en el escritorio).
+- **Reacción al levantarlo de la mesa (`O_o`):** aprovecha los 3 sensores infrarrojos inferiores (`D11, D7, D8`) para detectar al instante si alguien lo alza en el aire, alternando una cara desconcertada **`O_o` / `o_O`** mientras mira a ambos lados, y mostrando una sonrisa **`^_^`** de alivio cuando vuelve a apoyarse sobre el escritorio.
 
 ### 2. Cola de Notificaciones Bluetooth BLE (`DX-BT24`) con Nombre del Remitente
 El puente en Windows monitorea en tiempo real las notificaciones emergentes (*toasts*) de Windows 11 (y opcionalmente tu calendario `.ics` en directo), extrae el remitente o la hora de inicio de la reunión y transmite el aviso por **BLE (`9600 bps`)** al robot:
