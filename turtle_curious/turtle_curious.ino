@@ -4,7 +4,7 @@
 // ============================================================================
 // 1) ESTADO DE REPOSO Y SEGUIMIENTO DE MANO:
 //    - Pantalla 8x8 apagada y motores bloqueados en LOW.
-//    - Giro suave aleatorio entre 10 y 30 segundos (~52° a ~128°, 50 Hz).
+//    - Giro suave aleatorio entre 5 y 30 segundos (~52° a ~128°, 50 Hz).
 //    - Al acercar la mano (<= 12 cm): despierta sus ojos (brillo 8), engancha
 //      tu mano con el sensor ultrasónico y GIRA EL CUELLO SIGUIÉNDOLA hacia
 //      donde la muevas, orientando sus ojos hacia esa misma dirección; al
@@ -45,7 +45,7 @@ const int TRACK_STEP_US      = 14;   // Velocidad ágil siguiendo tu mano
 const int MIN_DELTA_US       = 260;  // Mínimo ~24° por giro aleatorio
 
 // --- Tiempos ---
-const unsigned long OBSERVE_MIN_MS = 10000UL; // Pausa aleatoria mín: 10 s
+const unsigned long OBSERVE_MIN_MS = 5000UL;  // Pausa aleatoria mín: 5 s
 const unsigned long OBSERVE_MAX_MS = 30000UL; // Pausa aleatoria máx: 30 s
 const unsigned long ICON_HOLD_MS   = 3200UL;  // Segundos mostrando ícono antes del texto
 const unsigned int  SCROLL_STEP_MS = 70;      // Velocidad de desplazamiento de texto
