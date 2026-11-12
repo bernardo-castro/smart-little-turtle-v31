@@ -43,6 +43,6 @@ $Settings = New-ScheduledTaskSettingsSet `
 Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $TriggerRepeat -Settings $Settings -Force | Out-Null
 Write-Host "[OK] Tarea programada '$TaskName' registrada (búsqueda cada 10 minutos)."
 
-# 3) Ejecutar ahora mismo en segundo plano
-Start-Process -FilePath "wscript.exe" -ArgumentList "`"$LocalVbsPath`""
+# 3) Ejecutar ahora mismo a través del Programador de Tareas (proceso independiente)
+Start-ScheduledTask -TaskName $TaskName
 Write-Host "[OK] Puente Bluetooth iniciado en segundo plano."
