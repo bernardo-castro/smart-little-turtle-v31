@@ -4,7 +4,7 @@
 // ============================================================================
 // 1) ESTADO DE REPOSO:
 //    - Pantalla 8x8 apagada y motores bloqueados en LOW.
-//    - Giro suave aleatorio entre 20 y 30 segundos (~52° a ~128°, 50 Hz).
+//    - Giro suave aleatorio entre 10 y 30 segundos (~52° a ~128°, 50 Hz).
 //    - Si pasas la mano bien cerca del sensor (<= 10 cm), desplaza "Buen día!".
 //
 // 2) COLA DE NOTIFICACIONES BLUETOOTH DX-BT24 (UART 9600 bps en RX/TX):
@@ -40,7 +40,7 @@ const int PULSE_STEP_US   = 7;    // Velocidad suave
 const int MIN_DELTA_US    = 260;  // Mínimo ~24° por giro aleatorio
 
 // --- Tiempos ---
-const unsigned long OBSERVE_MIN_MS = 20000UL; // Pausa aleatoria mín: 20 s
+const unsigned long OBSERVE_MIN_MS = 10000UL; // Pausa aleatoria mín: 10 s
 const unsigned long OBSERVE_MAX_MS = 30000UL; // Pausa aleatoria máx: 30 s
 const unsigned long ICON_HOLD_MS   = 3200UL;  // Segundos mostrando ícono antes del texto
 const unsigned int  SCROLL_STEP_MS = 70;      // Velocidad de desplazamiento de texto
