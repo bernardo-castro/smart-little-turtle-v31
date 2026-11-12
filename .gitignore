@@ -1,5 +1,6 @@
-# Logs, lanzador local autogenerado y cachés de Python
+# Logs, estado local, lanzador autogenerado y cachés de Python
 *.log
+sent_state.json
 lanzar_silencioso.vbs
 __pycache__/
 *.py[cod]

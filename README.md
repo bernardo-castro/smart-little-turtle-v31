@@ -9,7 +9,7 @@ Firmware en **Arduino** y puente de notificaciones en **Python (Windows 11)** pa
 ### 1. Modo Observador Silencioso (Estado de Reposo)
 - **Ruedas bloqueadas por software (`LOW`)** para uso seguro sobre el escritorio sin desplazarse.
 - **Pantalla LED `8x8` apagada** en reposo para no distraer.
-- **Paneo aleatorio silencioso:** cada **30 segundos**, el servo del cuello (`D10`) gira suavemente a una posición aleatoria entre `~52°` y `~128°` mediante pulsos manuales a `50 Hz` exactos (`7 µs` por cuadro de `20 ms`), cortando la señal al terminar para eliminar cualquier zumbido mecánico.
+- **Paneo aleatorio silencioso:** en intervalos aleatorios de **20 a 30 segundos**, el servo del cuello (`D10`) gira suavemente a una posición aleatoria entre `~52°` y `~128°` mediante pulsos manuales a `50 Hz` exactos (`7 µs` por cuadro de `20 ms`), cortando la señal al terminar para eliminar cualquier zumbido mecánico.
 - **Saludo por proximidad corta:** cuando el sensor ultrasónico (`HC-SR04`) detecta que pasas la mano bien cerca (`<= 10 cm`), desplaza el texto **`"Buen día!"`** de derecha a izquierda en la matriz `8x8` y vuelve al reposo (evitando activaciones accidentales a media distancia en el escritorio).
 
 ### 2. Cola de Notificaciones Bluetooth BLE (`DX-BT24`) con Nombre del Remitente

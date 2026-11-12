@@ -42,9 +42,10 @@ const int PULSE_STEP_US   = 7;    // Velocidad suave
 const int MIN_DELTA_US    = 260;  // Mínimo ~24° por giro aleatorio
 
 // --- Tiempos ---
-const unsigned long OBSERVE_PAUSE_MS = 30000UL; // Giro aleatorio cada 30 s
-const unsigned long ICON_HOLD_MS     = 3200UL;  // Segundos mostrando ícono antes del nombre
-const unsigned int  SCROLL_STEP_MS   = 70;      // Velocidad de desplazamiento de texto
+const unsigned long OBSERVE_MIN_MS = 20000UL; // Pausa aleatoria mín: 20 s
+const unsigned long OBSERVE_MAX_MS = 30000UL; // Pausa aleatoria máx: 30 s
+const unsigned long ICON_HOLD_MS   = 3200UL;  // Segundos mostrando ícono antes del nombre
+const unsigned int  SCROLL_STEP_MS = 70;      // Velocidad de desplazamiento de texto
 
 // --- Sensor Ultrasónico (proximidad corta: ~10 cm) ---
 const int   TRIG_PIN       = 12;
@@ -89,8 +90,13 @@ char rxBuf[44];
 uint8_t rxLen = 0;
 bool triggerRemoteBuenDia = false;
 
-int currentPulseUs         = PULSE_CENTER_US;
-unsigned long pauseStartMs = 0;
+int currentPulseUs                = PULSE_CENTER_US;
+unsigned long pauseStartMs        = 0;
+unsigned long nextObservePauseMs  = 25000UL;
+
+unsigned long pickRandomObservePauseMs() {
+  return (unsigned long)random(OBSERVE_MIN_MS, OBSERVE_MAX_MS + 1UL);
+}
 
 // ============================================================================
 // ÍCONOS 8x8 (fila 0 = arriba .. fila 7 = abajo; bit 0 = izq .. bit 7 = der)
@@ -491,7 +497,8 @@ void dismissCurrentNotification() {
   } else {
     currentNotifIdx = 0;
     clearScreen();
-    pauseStartMs = millis();
+    pauseStartMs       = millis();
+    nextObservePauseMs = pickRandomObservePauseMs();
   }
 }
 
@@ -620,7 +627,8 @@ void setup() {
   }
   panSmoothTo(pickRandomTargetUs(), false);
 
-  pauseStartMs = millis();
+  pauseStartMs       = millis();
+  nextObservePauseMs = pickRandomObservePauseMs();
 }
 
 void loop() {
@@ -632,7 +640,8 @@ void loop() {
     triggerRemoteBuenDia = false;
     scrollText(MSG_BUEN_DIA, false, true);
     clearScreen();
-    pauseStartMs = millis();
+    pauseStartMs       = millis();
+    nextObservePauseMs = pickRandomObservePauseMs();
     return;
   }
 
@@ -706,7 +715,7 @@ void loop() {
   }
 
   // ==========================================================================
-  // ESTADO DE REPOSO (Pantalla oscura + "Buen día!" <= 10 cm + Giro cada 30 s)
+  // ESTADO DE REPOSO (Pantalla oscura + "Buen día!" <= 10 cm + Giro 20~30 s)
   // ==========================================================================
   if (isSomeoneNear()) {
     digitalWrite(SERVO_PIN, LOW);
@@ -716,11 +725,12 @@ void loop() {
       clearScreen();
       delay(600);
     }
-    pauseStartMs = millis();
+    pauseStartMs       = millis();
+    nextObservePauseMs = pickRandomObservePauseMs();
     return;
   }
 
-  if (millis() - pauseStartMs >= OBSERVE_PAUSE_MS) {
+  if (millis() - pauseStartMs >= nextObservePauseMs) {
     int randomTargetUs = pickRandomTargetUs();
     bool spottedSomeone = panSmoothTo(randomTargetUs, true);
 
@@ -732,7 +742,8 @@ void loop() {
       }
     }
 
-    pauseStartMs = millis();
+    pauseStartMs       = millis();
+    nextObservePauseMs = pickRandomObservePauseMs();
   }
 
   delay(50);
