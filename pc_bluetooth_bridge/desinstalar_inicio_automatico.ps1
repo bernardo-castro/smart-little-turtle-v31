@@ -4,12 +4,9 @@ $TaskName = "TurtleRobotBluetooth"
 & schtasks.exe /Delete /TN $TaskName /F | Out-Null
 Write-Host "[OK] Tarea programada '$TaskName' eliminada."
 
-$StartupDir = [Environment]::GetFolderPath("Startup")
-$VbsPath = Join-Path $StartupDir "TurtleRobotBluetooth.vbs"
-if (Test-Path $VbsPath) {
-    Remove-Item $VbsPath -Force
-    Write-Host "[OK] Acceso de Inicio de Windows eliminado: $VbsPath"
-}
+$RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+Remove-ItemProperty -Path $RunKey -Name "TurtleRobotBluetooth" -ErrorAction SilentlyContinue
+Write-Host "[OK] Entrada de Inicio con Windows eliminada."
 
 Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe'" | Where-Object {
     $_.CommandLine -like "*bt_notifier.py*"
