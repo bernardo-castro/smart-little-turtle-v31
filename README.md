@@ -6,11 +6,11 @@ Firmware en **Arduino** y puente de notificaciones en **Python (Windows 11)** pa
 
 ## Características Principales
 
-### 1. Cara Viva Permanente y Seguimiento Orgánico
+### 1. Cara Viva Permanente Sincronizada 1:1 con el Ángulo del Ultrasonido
 - **Ruedas bloqueadas por software (`LOW`)** para uso seguro sobre el escritorio sin desplazarse.
-- **Cara siempre encendida con parpadeo y transiciones suaves (brillo `8`):** mantiene sus ojos expresivos activos todo el tiempo, con un **párpado progresivo de 4 niveles** (cierra y abre fila por fila cada `2.6` a `5.6 s`, con doble pestañeo ocasional), **deslizamiento horizontal de mirada en 5 pasos (`-2` a `+2`)** píxel a píxel y micro-miradas curiosas en reposo.
-- **Paneo aleatorio con anticipación y frenado suave (`5` a `30 s`):** antes de girar el cuello (`D10`), primero desliza suavemente la mirada hacia ese lado, acelera y frena progresivamente (*ease-in / ease-out* a `50 Hz`) mientras sigue pestañeando, y corta la señal al terminar para eliminar cualquier zumbido mecánico.
-- **Seguimiento vivo de tu mano + ojos direccionales:** cuando acercas la mano (`<= 12 cm`), engancha tu palma (`hasta ~26 cm`) y **gira el cuello siguiéndola en tiempo real** hacia izquierda o derecha mientras desliza sus ojos gradualmente hacia esa dirección; al retirarla se despide con un guiño `O_-` o sonrisa `^_^` y vuelve a abrir suavemente sus ojos.
+- **Cara sincronizada en tiempo real con el ángulo físico del cuello (brillo `8`):** divide el recorrido del servo ultrasónico en **7 zonas angulares continuas (`-3` a `+3`)**. A medida que el cabezal gira de un lado a otro, la cara en la matriz `8x8` se desplaza paso a paso acompañándolo (cruzando por el centro exacto `0` cuando el ultrasonido pasa por `90°`), y donde el cuello se detenga —izquierda, centro o derecha— **la cara se queda mirando exactamente hacia ese mismo ángulo** mientras pestañea suavemente en 4 niveles (`2.6` a `5.6 s`).
+- **Paneo aleatorio con aceleración y frenado suave (`5` a `30 s`):** el servo del cuello (`D10`) arranca y frena progresivamente (*ease-in / ease-out* a `50 Hz`) y corta la señal al terminar para eliminar cualquier zumbido mecánico.
+- **Seguimiento vivo de tu mano:** cuando acercas la mano (`<= 12 cm`), engancha tu palma (`hasta ~26 cm`) y **gira el cuello siguiéndola en tiempo real** mientras su cara refleja en vivo cada ángulo del recorrido; al retirarla se despide con un guiño `O_-` o sonrisa `^_^` y reabre suavemente sus ojos en esa posición.
 - **Reacción al levantarlo de la mesa (`O_o`):** aprovecha los 3 sensores infrarrojos inferiores (`D11, D7, D8`) para detectar al instante si alguien lo alza en el aire, alternando una cara desconcertada **`O_o` / `o_O`** mientras mira a ambos lados, y mostrando una sonrisa **`^_^`** de alivio cuando vuelve a apoyarse sobre el escritorio.
 
 ### 2. Cola de Notificaciones Bluetooth BLE (`DX-BT24`) con Nombre del Remitente

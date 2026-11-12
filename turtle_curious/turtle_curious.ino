@@ -2,16 +2,17 @@
 // Keyestudio Smart Little Turtle V3.1
 // Cara Viva Permanente + Transiciones Suaves + Seguimiento de Mano + Cola BLE
 // ============================================================================
-// 1) CARA VIVA PERMANENTE Y SEGUIMIENTO DE MANO:
+// 1) CARA VIVA SINCRONIZADA 1:1 CON EL ÁNGULO DEL CUELLO + SEGUIMIENTO DE MANO:
 //    - Cara siempre activa en brillo 8 (motores bloqueados en LOW).
+//    - Posición horizontal de la cara (7 zonas: -3..-2..-1..0..+1..+2..+3)
+//      sincronizada en tiempo real con el ángulo exacto del servo ultrasónico:
+//      si cruza por el centro pasa por el centro, y si queda mirando a un lado
+//      permanece mirando exactamente hacia ese lado mientras sigue pestañeando.
 //    - Parpadeo orgánico multi-etapa (párpado baja y sube fila por fila cada
-//      2.6~5.6 s, con doble pestañeo ocasional) y micro-miradas suaves.
-//    - Transición gradual de mirada en 5 pasos (-2, -1, 0, +1, +2) y giro de
-//      cuello con aceleración/frenado suave (ease-in / ease-out) cada 5~30 s,
-//      anticipando primero con los ojos hacia dónde va a girar.
-//    - Al acercar la mano (<= 12 cm): sigue tu mano de forma fluida con el
-//      cuello y orienta gradualmente los ojos hacia esa dirección; al retirarla
-//      hace un guiño/sonrisa y reabre suavemente sus ojos sin apagar pantalla.
+//      2.6~5.6 s, con doble pestañeo ocasional) y giro amortiguado (5~30 s).
+//    - Al acercar la mano (<= 12 cm): sigue tu mano con el cuello y desplaza
+//      la cara sincronizada con el ángulo real; al retirarla hace guiño/sonrisa
+//      y reabre suavemente sus ojos en el ángulo actual.
 //    - Si levantas el robot de la mesa: pone cara "O_o" / "o_O" al instante.
 //
 // 2) COLA DE NOTIFICACIONES BLUETOOTH DX-BT24 (UART 9600 bps en RX/TX):
@@ -115,22 +116,17 @@ unsigned long pauseStartMs       = 0;
 unsigned long nextObservePauseMs = 15000UL;
 int8_t lastGoodbyeGesture        = 0;
 
-// --- Estado de Cara Viva Permanente y Animación Suave ---
+// --- Estado de Cara Viva Permanente Sincronizada al Ángulo del Ultrasonido ---
 uint8_t currentMatrixBrightness  = 255;
 bool faceRenderDirty             = true;
-int8_t currentGaze               = 0;   // -2 (izq total) .. -1 .. 0 (centro) .. +1 .. +2 (der total)
-int8_t targetGaze                = 0;
+int8_t currentGaze               = 0;   // -3 (izq extremo) .. 0 (centro) .. +3 (der extremo)
 int8_t lastRenderedGaze          = 99;
 uint8_t currentLid               = 3;   // 0=abierto, 1=bajando1, 2=bajando2, 3=cerrado
 uint8_t lastRenderedLid          = 99;
-uint8_t blinkSeqStep             = 0;   // 0=inactivo, 1..6=etapas del parpadeo suave
+uint8_t blinkSeqStep             = 0;   // 0=inactivo, 1..5=etapas del parpadeo suave
 bool pendingDoubleBlink          = false;
-unsigned long lastGazeStepMs     = 0;
 unsigned long blinkStepStartMs   = 0;
 unsigned long nextBlinkAtMs      = 0;
-unsigned long nextGlanceAtMs     = 0;
-unsigned long glanceReleaseAtMs  = 0;
-bool glanceActive                = false;
 
 unsigned long pickRandomObservePauseMs() {
   return (unsigned long)random(OBSERVE_MIN_MS, OBSERVE_MAX_MS + 1UL);
@@ -138,10 +134,6 @@ unsigned long pickRandomObservePauseMs() {
 
 unsigned long pickRandomBlinkDelayMs() {
   return (unsigned long)random(2600UL, 5600UL);
-}
-
-unsigned long pickRandomGlanceDelayMs() {
-  return (unsigned long)random(4200UL, 8800UL);
 }
 
 // ============================================================================
@@ -399,32 +391,67 @@ void clearScreen() {
   showRows(empty);
 }
 
-// --- Motor de Cara Viva Permanente (mirada en 5 pasos + párpado en 4 niveles) ---
+// --- Motor de Cara Viva Sincronizada 1:1 con el Ángulo del Ultrasonido ---
+// Convierte el pulso real del cuello (currentPulseUs) en 7 zonas continuas (-3..+3)
+// con histéresis de ±8 µs para evitar parpadeo en bordes:
+//   -3: extremo izq  (< 1170 µs)
+//   -2: izquierda    (1170..1299 µs)
+//   -1: semi-izq     (1300..1424 µs)
+//    0: centro       (1425..1555 µs, ~90° frente exacto)
+//   +1: semi-der     (1556..1680 µs)
+//   +2: derecha      (1681..1810 µs)
+//   +3: extremo der  (> 1810 µs)
+int8_t gazeZoneFromPulseUs(int pulseUs, int8_t prevZone) {
+  const int bounds[6] = {1170, 1300, 1425, 1555, 1680, 1810};
+  int8_t rawZone = 3;
+  for (uint8_t i = 0; i < 6; i++) {
+    if (pulseUs < bounds[i]) {
+      rawZone = (int8_t)i - 3;
+      break;
+    }
+  }
+  if (prevZone >= -3 && prevZone <= 3 && abs((int)rawZone - (int)prevZone) == 1) {
+    uint8_t boundaryIdx = (uint8_t)((rawZone > prevZone) ? (prevZone + 3) : (rawZone + 3));
+    if (abs(pulseUs - bounds[boundaryIdx]) < 8) {
+      return prevZone;
+    }
+  }
+  return rawZone;
+}
+
 void drawLivingFacePixels(int8_t gaze, uint8_t lid) {
-  if (gaze < -2) gaze = -2;
-  if (gaze >  2) gaze =  2;
+  if (gaze < -3) gaze = -3;
+  if (gaze >  3) gaze =  3;
   if (lid  >  3) lid  =  3;
 
   uint8_t eyeCols    = 0x66;
   uint8_t topRowMask = 0x66;
   uint8_t mouth      = 0x18;
 
-  if (gaze == -2) {
-    eyeCols    = 0x1B; // x=0,1 y x=3,4 (perspectiva lateral hacia izq)
+  if (gaze == -3) {
+    eyeCols    = 0x1B; // x=0,1 y x=3,4 (extremo izquierdo con perspectiva)
+    topRowMask = 0x03;
+    mouth      = 0x06;
+  } else if (gaze == -2) {
+    eyeCols    = 0x33; // x=0,1 y x=4,5 (izquierda con perspectiva)
     topRowMask = 0x03;
     mouth      = 0x0C;
   } else if (gaze == -1) {
-    eyeCols    = 0x33; // paso intermedio suave hacia izq
+    eyeCols    = 0x33; // x=0,1 y x=4,5 (semi-izquierda)
     topRowMask = 0x33;
     mouth      = 0x0C;
   } else if (gaze == 1) {
-    eyeCols    = 0xCC; // paso intermedio suave hacia der
+    eyeCols    = 0xCC; // x=2,3 y x=6,7 (semi-derecha)
     topRowMask = 0xCC;
     mouth      = 0x30;
   } else if (gaze == 2) {
-    eyeCols    = 0xD8; // x=3,4 y x=6,7 (perspectiva lateral hacia der)
+    eyeCols    = 0xCC; // x=2,3 y x=6,7 (derecha con perspectiva)
     topRowMask = 0xC0;
     mouth      = 0x30;
+  } else if (gaze == 3) {
+    eyeCols    = 0xD8; // x=3,4 y x=6,7 (extremo derecho con perspectiva)
+    topRowMask = 0xC0;
+    mouth      = 0x60;
   }
 
   uint8_t rows[8];
@@ -444,49 +471,25 @@ void drawLivingFacePixels(int8_t gaze, uint8_t lid) {
   faceRenderDirty  = false;
 }
 
-void resumeLivingFaceSmooth(int8_t desiredGaze = 0) {
+void resumeLivingFaceSmooth(int8_t unused = 0) {
+  (void)unused;
   unsigned long now  = millis();
-  targetGaze         = desiredGaze;
-  glanceActive       = false;
+  currentGaze        = gazeZoneFromPulseUs(currentPulseUs, currentGaze);
   pendingDoubleBlink = false;
-  // Reabrir suavemente los párpados (3 -> 2 -> 1 -> 0) al volver de cualquier gesto/texto
+  // Reabrir suavemente los párpados (3 -> 2 -> 1 -> 0) exactamente en el ángulo actual
   currentLid         = 3;
   blinkSeqStep       = 3;
   blinkStepStartMs   = now;
-  lastGazeStepMs     = now;
   nextBlinkAtMs      = now + pickRandomBlinkDelayMs();
-  nextGlanceAtMs     = now + pickRandomGlanceDelayMs();
   faceRenderDirty    = true;
   drawLivingFacePixels(currentGaze, currentLid);
 }
 
-void setTargetGazeExplicit(int8_t gaze) {
-  if (gaze < -2) gaze = -2;
-  if (gaze >  2) gaze =  2;
-  glanceActive = false;
-  targetGaze   = gaze;
-}
-
-void updateLivingFace(bool allowIdleGlances) {
+void updateLivingFace() {
   unsigned long now = millis();
 
-  if (allowIdleGlances) {
-    if (glanceActive && now >= glanceReleaseAtMs) {
-      glanceActive   = false;
-      targetGaze     = 0;
-      nextGlanceAtMs = now + pickRandomGlanceDelayMs();
-    } else if (!glanceActive && blinkSeqStep == 0 && now >= nextGlanceAtMs) {
-      glanceActive      = true;
-      targetGaze        = (random(0, 2) == 0) ? -1 : 1;
-      glanceReleaseAtMs = now + (unsigned long)random(900UL, 1800UL);
-    }
-  }
-
-  // Deslizamiento gradual de la mirada (60 ms por paso: -2 <-> -1 <-> 0 <-> +1 <-> +2)
-  if (currentGaze != targetGaze && (now - lastGazeStepMs >= 60UL)) {
-    lastGazeStepMs = now;
-    currentGaze += (targetGaze > currentGaze) ? 1 : -1;
-  }
+  // Sincronización directa en tiempo real con el ángulo físico del ultrasonido
+  currentGaze = gazeZoneFromPulseUs(currentPulseUs, currentGaze);
 
   // Cortina suave del párpado superior (0 -> 1 -> 2 -> 3 -> 2 -> 1 -> 0)
   if (blinkSeqStep == 0) {
@@ -934,24 +937,6 @@ bool panSmoothTo(int targetPulseUs, bool stopOnNear = true, bool animateFace = f
   int nearHits     = 0;
   int startPulseUs = currentPulseUs;
 
-  // Anticipación natural: primero desliza suavemente los ojos hacia el lado al que va a girar
-  if (animateFace && abs(targetPulseUs - currentPulseUs) >= 90) {
-    int8_t turnGaze = (targetPulseUs > currentPulseUs) ? 2 : -2;
-    setTargetGazeExplicit(turnGaze);
-    unsigned long antStart = millis();
-    while (millis() - antStart < 135UL) {
-      pollBluetooth();
-      if (stopOnNear && (notifCount > 0 || !rawSensorsOnDesk())) {
-        return false;
-      }
-      updateLivingFace(false);
-      if (stopOnNear && readDistanceFastCm() <= TRACK_START_CM) {
-        return true;
-      }
-      delay(16);
-    }
-  }
-
   while (currentPulseUs != targetPulseUs) {
     unsigned long frameStartUs = micros();
 
@@ -980,7 +965,7 @@ bool panSmoothTo(int targetPulseUs, bool stopOnNear = true, bool animateFace = f
     digitalWrite(SERVO_PIN, LOW);
 
     if (animateFace) {
-      updateLivingFace(false);
+      updateLivingFace();
     }
 
     if (stopOnNear) {
@@ -1007,10 +992,8 @@ bool panSmoothTo(int targetPulseUs, bool stopOnNear = true, bool animateFace = f
 
   digitalWrite(SERVO_PIN, LOW);
 
-  // Al terminar el giro, sostiene un instante la mirada lateral y luego regresa suave al centro
   if (animateFace) {
-    glanceActive      = true;
-    glanceReleaseAtMs = millis() + 280UL;
+    updateLivingFace();
   }
   return false;
 }
@@ -1031,7 +1014,7 @@ bool waitInteractiveMs(unsigned long ms) {
   return true;
 }
 
-// --- Seguimiento activo de tu mano con el cuello + ojos con transición suave ---
+// --- Seguimiento activo de tu mano con el cuello + cara sincronizada al ángulo ---
 enum TrackState : uint8_t {
   TRK_LOCKED    = 0,
   TRK_PROBE_1   = 1,
@@ -1040,14 +1023,11 @@ enum TrackState : uint8_t {
 };
 
 void trackHandWithEyes() {
-  // Como la cara ya está encendida en reposo, engancha fluido sin saltos bruscos
-  TrackState state       = TRK_LOCKED;
-  int8_t trackDir        = 1;   // +1 = hacia PULSE_MAX_US (mirada +2), -1 = hacia PULSE_MIN_US (mirada -2)
-  int8_t desiredGaze     = 0;
-  uint8_t gazeHoldFrames = 0;
-  uint8_t centerFrames   = 0;
-  int curTrackStepUs     = 5;
-  int sweepStartUs       = currentPulseUs;
+  TrackState state     = TRK_LOCKED;
+  int8_t trackDir      = 1;
+  uint8_t centerFrames = 0;
+  int curTrackStepUs   = 5;
+  int sweepStartUs     = currentPulseUs;
 
   while (true) {
     unsigned long frameStartUs = micros();
@@ -1069,67 +1049,46 @@ void trackHandWithEyes() {
 
     if (state == TRK_LOCKED) {
       curTrackStepUs = 5;
-      if (handSeen) {
-        if (gazeHoldFrames > 0) {
-          gazeHoldFrames--;
-        } else if (currentPulseUs < 1180) {
-          desiredGaze = -2;
-        } else if (currentPulseUs < 1350) {
-          desiredGaze = -1;
-        } else if (currentPulseUs > 1800) {
-          desiredGaze = 2;
-        } else if (currentPulseUs > 1630) {
-          desiredGaze = 1;
-        } else {
-          desiredGaze = 0;
-        }
-      } else {
+      if (!handSeen) {
         state          = TRK_PROBE_1;
         sweepStartUs   = currentPulseUs;
         curTrackStepUs = 5;
-        desiredGaze    = (trackDir > 0) ? 2 : -2;
       }
     }
 
     if (state == TRK_PROBE_1) {
       if (handSeen) {
-        state          = TRK_CENTERING;
-        centerFrames   = 4;
-        desiredGaze    = (trackDir > 0) ? 2 : -2;
-        gazeHoldFrames = 10;
+        state        = TRK_CENTERING;
+        centerFrames = 4;
       } else {
         if (curTrackStepUs < TRACK_STEP_US) {
           curTrackStepUs += 2;
           if (curTrackStepUs > TRACK_STEP_US) curTrackStepUs = TRACK_STEP_US;
         }
-        int nextUs      = currentPulseUs + (int)trackDir * curTrackStepUs;
-        bool hitLimit   = (nextUs < TRACK_PULSE_MIN_US || nextUs > TRACK_PULSE_MAX_US);
+        int nextUs       = currentPulseUs + (int)trackDir * curTrackStepUs;
+        bool hitLimit    = (nextUs < TRACK_PULSE_MIN_US || nextUs > TRACK_PULSE_MAX_US);
         bool sweptEnough = (abs(nextUs - sweepStartUs) >= 240);
 
         if (hitLimit || sweptEnough) {
           trackDir       = -trackDir;
           curTrackStepUs = 5;
-          desiredGaze    = (trackDir > 0) ? 2 : -2;
           state          = TRK_PROBE_2;
         } else {
           currentPulseUs = nextUs;
           movedServo     = true;
-          desiredGaze    = (trackDir > 0) ? 2 : -2;
         }
       }
     } else if (state == TRK_PROBE_2) {
       if (handSeen) {
-        state          = TRK_CENTERING;
-        centerFrames   = 4;
-        desiredGaze    = (trackDir > 0) ? 2 : -2;
-        gazeHoldFrames = 10;
+        state        = TRK_CENTERING;
+        centerFrames = 4;
       } else {
         if (curTrackStepUs < TRACK_STEP_US) {
           curTrackStepUs += 2;
           if (curTrackStepUs > TRACK_STEP_US) curTrackStepUs = TRACK_STEP_US;
         }
-        int nextUs         = currentPulseUs + (int)trackDir * curTrackStepUs;
-        bool hitLimit      = (nextUs < TRACK_PULSE_MIN_US || nextUs > TRACK_PULSE_MAX_US);
+        int nextUs          = currentPulseUs + (int)trackDir * curTrackStepUs;
+        bool hitLimit       = (nextUs < TRACK_PULSE_MIN_US || nextUs > TRACK_PULSE_MAX_US);
         bool sweptOtherSide = (abs(nextUs - sweepStartUs) >= 340);
 
         if (hitLimit || sweptOtherSide) {
@@ -1137,7 +1096,6 @@ void trackHandWithEyes() {
         } else {
           currentPulseUs = nextUs;
           movedServo     = true;
-          desiredGaze    = (trackDir > 0) ? 2 : -2;
         }
       }
     } else if (state == TRK_CENTERING) {
@@ -1149,10 +1107,8 @@ void trackHandWithEyes() {
           movedServo     = true;
         }
         centerFrames--;
-        desiredGaze = (trackDir > 0) ? 1 : -1;
       } else {
-        state          = TRK_LOCKED;
-        gazeHoldFrames = 8;
+        state = TRK_LOCKED;
       }
     }
 
@@ -1162,8 +1118,8 @@ void trackHandWithEyes() {
       digitalWrite(SERVO_PIN, LOW);
     }
 
-    setTargetGazeExplicit(desiredGaze);
-    updateLivingFace(false);
+    // La cara siempre refleja el ángulo físico exacto de currentPulseUs (-3..+3)
+    updateLivingFace();
 
     unsigned long elapsedUs = micros() - frameStartUs;
     if (elapsedUs < 20000UL) {
@@ -1189,7 +1145,7 @@ void trackHandWithEyes() {
   if (!waitInteractiveMs(650)) return;
 
   if (notifCount == 0) {
-    resumeLivingFaceSmooth(0);
+    resumeLivingFaceSmooth();
   }
 }
 
@@ -1293,7 +1249,7 @@ void setup() {
     digitalWrite(SERVO_PIN, HIGH);
     delayMicroseconds(currentPulseUs);
     digitalWrite(SERVO_PIN, LOW);
-    updateLivingFace(false);
+    updateLivingFace();
     delay(20);
   }
   panSmoothTo(pickRandomTargetUs(), false, true);
@@ -1402,9 +1358,9 @@ void loop() {
   }
 
   // ==========================================================================
-  // ESTADO VIVO PERMANENTE (Cara encendida + Pestañeo suave + Giro 5~30 s)
+  // ESTADO VIVO PERMANENTE (Cara sincronizada al ángulo + Giro 5~30 s)
   // ==========================================================================
-  updateLivingFace(true);
+  updateLivingFace();
 
   if (millis() - lastIdleSonarMs >= 55UL) {
     lastIdleSonarMs = millis();
