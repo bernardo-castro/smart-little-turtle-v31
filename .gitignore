@@ -1,6 +1,7 @@
-# Logs, estado local, lanzador autogenerado y cachés de Python
+# Logs, estado local, configuración privada de calendario y cachés de Python
 *.log
 sent_state.json
+calendar_config.json
 lanzar_silencioso.vbs
 __pycache__/
 *.py[cod]

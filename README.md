@@ -13,12 +13,13 @@ Firmware en **Arduino** y puente de notificaciones en **Python (Windows 11)** pa
 - **Saludo por proximidad corta:** cuando el sensor ultrasónico (`HC-SR04`) detecta que pasas la mano bien cerca (`<= 10 cm`), desplaza el texto **`"Buen día!"`** de derecha a izquierda en la matriz `8x8` y vuelve al reposo (evitando activaciones accidentales a media distancia en el escritorio).
 
 ### 2. Cola de Notificaciones Bluetooth BLE (`DX-BT24`) con Nombre del Remitente
-El puente en Windows monitorea en tiempo real las notificaciones emergentes (*toasts*) de Windows 11, extrae el **nombre de quien envía el mensaje** y transmite el aviso por **BLE (`9600 bps`)** al robot:
+El puente en Windows monitorea en tiempo real las notificaciones emergentes (*toasts*) de Windows 11 (y opcionalmente tu calendario `.ics` en directo), extrae el remitente o la hora de inicio de la reunión y transmite el aviso por **BLE (`9600 bps`)** al robot:
 
 | Evento / Trama BLE | Acción del Robot | Pantalla `8x8` |
 | :--- | :--- | :--- |
 | **`M:<Remitente>`** (Nuevo correo en Gmail / Outlook) | Encola el correo, gira al frente (`90°`), muestra el sobre respirando (`~3.2 s`) y desplaza el **nombre del remitente**. | `✉` → `Nombre` |
 | **`C:<Remitente>`** (Mensaje en Google Chat / Hangouts o Chat integrado en Gmail) | Encola el chat, gira al frente (`90°`), muestra el globo animado (`~3.2 s`) y desplaza el **nombre de quien escribió**. | `💬` → `Nombre` |
+| **`R:<Min>:<Reunión>`** (Reuniones de Google Calendar, Outlook, Teams, Zoom o `.ics`) | Encola o actualiza la reunión, hace un pequeño giro de atención, muestra un **reloj animado (`⏰`)** y descuenta los minutos en vivo:<br>• Si falta tiempo (`Min > 0`): **`En 10m: <Reunión>`** (baja minuto a minuto solo)<br>• En el minuto exacto (`Min == 0`): **`Inicia ya: <Reunión>`**<br>• Si ya empezó (`Min < 0`): **`Ya inició (3m): <Reunión>`** (y el reloj gira más rápido) | `⏰` → `En Xm` / `Ya inició` |
 | **`B`** (Saludo remoto manual) | Desplaza el mensaje `"Buen día!"` en pantalla. | Texto `Buen día!` |
 | **`X`** (Limpiar cola) | Vacía inmediatamente todas las notificaciones pendientes y regresa al reposo. | Pantalla apagada |
 
@@ -96,10 +97,10 @@ Una vez finalizada la carga, apaga el robot, inserta nuevamente el módulo **DX-
 2. **(Opcional) Configurar la dirección MAC de tu módulo DX-BT24:**
    El script detecta automáticamente módulos con nombre `BT24` o servicio `0xFFE0`, y prioriza la dirección configurada en la variable de entorno `TURTLE_BT24_MAC` (o en la constante `BT24_MAC_ADDRESS` dentro de `bt_notifier.py`).
 
-3. **Habilitar notificaciones de escritorio en Chrome y Gmail:**
-   - En **Gmail -> Configuración -> General -> Notificaciones de escritorio**, selecciona *Activar notificaciones de correos electrónicos nuevos*.
-   - En **Google Chat** (o Chat dentro de Gmail), activa *Permitir notificaciones de chat*.
-   - Verifica que **Google Chrome** tenga permitido mostrar notificaciones en *Configuración de Windows -> Sistema -> Notificaciones*.
+3. **Habilitar notificaciones de Correo, Chat y Reuniones:**
+   - **Gmail y Google Chat:** en *Gmail -> Configuración -> General -> Notificaciones de escritorio*, activa las notificaciones de correos nuevos y de chat.
+   - **Reuniones por navegador (Opción A):** abre `https://calendar.google.com` en Chrome, ve a *Configuración -> Configuración de notificaciones -> Notificaciones -> **Notificaciones de escritorio*** y acepta el permiso en Chrome (también detecta avisos de calendario de **Outlook**, **Teams** y **Zoom**).
+   - **Reuniones en directo sin tener Chrome abierto (Opción B, recomendada):** copia `pc_bluetooth_bridge\calendar_config.example.json` a `pc_bluetooth_bridge\calendar_config.json` y pega tu **Dirección secreta en formato iCal (`.ics`)** desde *Google Calendar -> Configuración de mi calendario -> Integrar el calendario*. El puente consultará tus reuniones cada minuto en segundo plano.
 
 4. **Activar el arranque con Windows + búsqueda cada 10 minutos:**
    ```powershell
@@ -116,6 +117,9 @@ Una vez finalizada la carga, apaga el robot, inserta nuevamente el módulo **DX-
 - **Modo consola interactivo:** ejecuta `pc_bluetooth_bridge\iniciar_notificaciones.bat` (debes no tener la instancia automática corriendo o detenerla antes). Permite enviar comandos en vivo presionando:
   - `[m:Juan Perez]` + Enter → Probar aviso de **Correo (`✉`)** con remitente
   - `[c:Sylvia]` + Enter → Probar aviso de **Chat (`💬`)** con remitente
+  - `[r:10:Planificacion]` + Enter → Probar **Reunión (`⏰`)** que inicia en 10 min
+  - `[r:0:Daily]` + Enter → Probar **Reunión (`⏰`)** que inicia ahora mismo
+  - `[r:-4:Coordinacion]` + Enter → Probar **Reunión (`⏰`)** que ya inició hace 4 min
   - `[b]` + Enter → Disparar saludo **`"Buen día!"`**
   - `[x]` + Enter → Vaciar toda la cola de notificaciones
   - `[q]` + Enter → Salir

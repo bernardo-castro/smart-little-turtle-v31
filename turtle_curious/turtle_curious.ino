@@ -1,26 +1,24 @@
 // ============================================================================
 // Keyestudio Smart Little Turtle V3.1
-// Observador Silencioso + "Buen día!" (<=10 cm) + Cola de Notificaciones BLE
+// Observador Silencioso + "Buen día!" (<=10 cm) + Cola BLE (Mail, Chat, Meet)
 // ============================================================================
 // 1) ESTADO DE REPOSO:
 //    - Pantalla 8x8 apagada y motores bloqueados en LOW.
-//    - Giro suave aleatorio cada 30 segundos (~52° a ~128°, 50 Hz sin ruido).
-//    - Si pasas la mano bien cerca del sensor (<= 10 cm), desplaza "Buen día!"
-//      de Derecha a Izquierda.
+//    - Giro suave aleatorio entre 20 y 30 segundos (~52° a ~128°, 50 Hz).
+//    - Si pasas la mano bien cerca del sensor (<= 10 cm), desplaza "Buen día!".
 //
 // 2) COLA DE NOTIFICACIONES BLUETOOTH DX-BT24 (UART 9600 bps en RX/TX):
-//    - Formato recibido desde PC:
-//        "M:<Remitente>\n" -> Encola aviso de EMAIL (✉) + nombre del remitente
-//        "C:<Remitente>\n" -> Encola aviso de CHAT  (💬) + nombre del remitente
-//        "X\n"             -> Limpia toda la cola
-//        "B\n"             -> Saludo remoto "Buen día!"
-//    - Al tener 1 o varios mensajes en cola:
-//        * Mira al frente (90°).
-//        * Muestra el ícono animado (✉ o 💬) unos segundos (~3.2 s) y luego
-//          desplaza el nombre de quien envió el mensaje (ej. "1/2 Sylvia").
-//        * Si hay varios mensajes, los va iterando uno tras otro continuamente.
-//        * Al acercar la mano al sensor (<= 10 cm), muestra ✔ y borra de a UNO
-//          el mensaje actual, pasando al siguiente hasta vaciar la cola.
+//    - Formatos recibidos desde PC:
+//        "M:<Remitente>\n"        -> EMAIL (✉) + nombre del remitente
+//        "C:<Remitente>\n"        -> CHAT  (💬) + nombre del remitente
+//        "R:<Min>:<Reunión>\n"    -> REUNIÓN (⏰) con cuenta regresiva viva:
+//                                      * Min > 0  : "En 10m: <Reunión>" (baja cada min)
+//                                      * Min == 0 : "Inicia ya: <Reunión>"
+//                                      * Min < 0  : "Ya inició (3m): <Reunión>"
+//        "X\n"                    -> Limpia toda la cola
+//        "B\n"                    -> Saludo remoto "Buen día!"
+//    - Si hay varios avisos, los itera continuamente y al acercar la mano
+//      (<= 10 cm) muestra ✔ y los va borrando de a UNO.
 // ============================================================================
 
 #include <Wire.h>
@@ -44,7 +42,7 @@ const int MIN_DELTA_US    = 260;  // Mínimo ~24° por giro aleatorio
 // --- Tiempos ---
 const unsigned long OBSERVE_MIN_MS = 20000UL; // Pausa aleatoria mín: 20 s
 const unsigned long OBSERVE_MAX_MS = 30000UL; // Pausa aleatoria máx: 30 s
-const unsigned long ICON_HOLD_MS   = 3200UL;  // Segundos mostrando ícono antes del nombre
+const unsigned long ICON_HOLD_MS   = 3200UL;  // Segundos mostrando ícono antes del texto
 const unsigned int  SCROLL_STEP_MS = 70;      // Velocidad de desplazamiento de texto
 
 // --- Sensor Ultrasónico (proximidad corta: ~10 cm) ---
@@ -59,7 +57,8 @@ const uint8_t HT16K33_ADDR = 0x70;
 enum NotifType : uint8_t {
   NOTIF_NONE = 0,
   NOTIF_MAIL = 1,
-  NOTIF_CHAT = 2
+  NOTIF_CHAT = 2,
+  NOTIF_MEET = 3
 };
 
 enum NotifPhase : uint8_t {
@@ -68,10 +67,12 @@ enum NotifPhase : uint8_t {
 };
 
 const uint8_t MAX_NOTIFS     = 10;
-const uint8_t MAX_SENDER_LEN = 26;
+const uint8_t MAX_SENDER_LEN = 24;
 
 struct NotifItem {
   NotifType type;
+  int16_t startOffsetMin;     // Para NOTIF_MEET: minutos hasta iniciar al recibirlo
+  unsigned long rxMillis;     // millis() al recibirlo para descontar en vivo
   char sender[MAX_SENDER_LEN];
 };
 
@@ -80,19 +81,20 @@ uint8_t notifCount      = 0;
 uint8_t currentNotifIdx = 0;
 NotifPhase notifPhase   = PHASE_ICON;
 
-bool notifNeedsCenterPan      = false;
-unsigned long phaseStartMs    = 0;
-unsigned long lastNotifAnimMs = 0;
-int notifAnimStep             = 0;
+bool notifNeedsCenterPan       = false;
+bool notifNeedsAttentionWiggle = false;
+unsigned long phaseStartMs     = 0;
+unsigned long lastNotifAnimMs  = 0;
+int notifAnimStep              = 0;
 
 // Buffer de recepción serie no bloqueante
-char rxBuf[44];
+char rxBuf[48];
 uint8_t rxLen = 0;
 bool triggerRemoteBuenDia = false;
 
-int currentPulseUs                = PULSE_CENTER_US;
-unsigned long pauseStartMs        = 0;
-unsigned long nextObservePauseMs  = 25000UL;
+int currentPulseUs               = PULSE_CENTER_US;
+unsigned long pauseStartMs       = 0;
+unsigned long nextObservePauseMs = 25000UL;
 
 unsigned long pickRandomObservePauseMs() {
   return (unsigned long)random(OBSERVE_MIN_MS, OBSERVE_MAX_MS + 1UL);
@@ -118,13 +120,29 @@ const uint8_t ICON_CHAT_2[8] = {
   0x7E, 0x81, 0xBD, 0x81, 0x9D, 0x72, 0x0A, 0x06
 };
 
+// Reloj despertador 8x8 (⏰) con aguja girando en sentido horario (12 -> 3 -> 6 -> 9)
+const uint8_t ICON_MEET_0[8] = {
+  0x41, 0x3E, 0x49, 0x49, 0x49, 0x41, 0x41, 0x3E
+};
+
+const uint8_t ICON_MEET_1[8] = {
+  0x41, 0x3E, 0x41, 0x41, 0x59, 0x41, 0x41, 0x3E
+};
+
+const uint8_t ICON_MEET_2[8] = {
+  0x41, 0x3E, 0x41, 0x41, 0x49, 0x49, 0x49, 0x3E
+};
+
+const uint8_t ICON_MEET_3[8] = {
+  0x41, 0x3E, 0x41, 0x41, 0x4D, 0x41, 0x41, 0x3E
+};
+
 const uint8_t ICON_CHECK[8] = {
   0x00, 0x80, 0xC0, 0x60, 0x31, 0x1B, 0x0E, 0x04
 };
 
 // ============================================================================
 // FUENTE PROPORCIONAL 8 FILAS (bit 0 = arriba y=0, bit 7 = abajo y=7)
-// Códigos extendidos desde PC:
 //   0x80=á  0x81=é  0x82=í  0x83=ó  0x84=ú  0x85=ñ  0x86=Ñ  0x87=ü
 // ============================================================================
 struct GlyphDef {
@@ -203,14 +221,14 @@ const GlyphDef FONT_TABLE[] PROGMEM = {
   {'z', 4, {0x88, 0xC8, 0xA8, 0x98, 0}},
 
   // Acentos y eñe en español
-  {0x80, 4, {0x40, 0xA8, 0xAA, 0xF1, 0}},       // á
-  {0x81, 4, {0x70, 0xA8, 0xAA, 0xB1, 0}},       // é
-  {0x82, 3, {0x88, 0xFA, 0x81, 0, 0}},          // í
-  {0x83, 4, {0x70, 0x88, 0x8A, 0x71, 0}},       // ó
-  {0x84, 4, {0x78, 0x80, 0x82, 0xF9, 0}},       // ú
-  {0x85, 4, {0xFA, 0x09, 0x0A, 0xF1, 0}},       // ñ
-  {0x86, 5, {0xFC, 0x09, 0x11, 0x21, 0xFC}},    // Ñ
-  {0x87, 4, {0x79, 0x80, 0x80, 0xF9, 0}},       // ü
+  {0x80, 4, {0x40, 0xA8, 0xAA, 0xF1, 0}},    // á
+  {0x81, 4, {0x70, 0xA8, 0xAA, 0xB1, 0}},    // é
+  {0x82, 3, {0x88, 0xFA, 0x81, 0, 0}},       // í
+  {0x83, 4, {0x70, 0x88, 0x8A, 0x71, 0}},    // ó
+  {0x84, 4, {0x78, 0x80, 0x82, 0xF9, 0}},    // ú
+  {0x85, 4, {0xFA, 0x09, 0x0A, 0xF1, 0}},    // ñ
+  {0x86, 5, {0xFC, 0x09, 0x11, 0x21, 0xFC}}, // Ñ
+  {0x87, 4, {0x79, 0x80, 0x80, 0xF9, 0}},    // ü
 
   // Signos comunes
   {'!', 1, {0xBE, 0, 0, 0, 0}},
@@ -229,7 +247,6 @@ const GlyphDef FONT_TABLE[] PROGMEM = {
 
 const uint8_t FONT_COUNT = sizeof(FONT_TABLE) / sizeof(FONT_TABLE[0]);
 
-// Texto "Buen día!" usando el código 0x82 para 'í'
 const char MSG_BUEN_DIA[] = "Buen d\x82" "a!";
 
 uint8_t getGlyph(uint8_t ch, uint8_t outCols[5]) {
@@ -248,7 +265,6 @@ uint8_t getGlyph(uint8_t ch, uint8_t outCols[5]) {
       return w;
     }
   }
-  // Carácter desconocido -> pequeño guion
   outCols[0] = 0x10;
   outCols[1] = 0x10;
   return 2;
@@ -316,11 +332,47 @@ bool isSomeoneNear() {
   return (d2 <= NEAR_DETECT_CM + 1.5f);
 }
 
+long currentMeetingRemainingMin(const NotifItem& item) {
+  long elapsedMin = (long)((millis() - item.rxMillis) / 60000UL);
+  return (long)item.startOffsetMin - elapsedMin;
+}
+
 // --- Gestión de Cola de Notificaciones ---
-void enqueueNotification(NotifType type, const char* senderRaw) {
+void enqueueNotification(NotifType type, const char* senderRaw, int16_t meetOffsetMin = 0) {
   bool wasEmpty = (notifCount == 0);
 
-  // Si la cola está llena, descartar la más antigua para hacer lugar
+  while (*senderRaw == ' ' || *senderRaw == ':') {
+    senderRaw++;
+  }
+
+  char cleanName[MAX_SENDER_LEN];
+  if (*senderRaw == '\0') {
+    if (type == NOTIF_MAIL) {
+      strncpy(cleanName, "Correo nuevo", MAX_SENDER_LEN - 1);
+    } else if (type == NOTIF_MEET) {
+      strncpy(cleanName, "Reuni\x83n", MAX_SENDER_LEN - 1);
+    } else {
+      strncpy(cleanName, "Mensaje nuevo", MAX_SENDER_LEN - 1);
+    }
+  } else {
+    strncpy(cleanName, senderRaw, MAX_SENDER_LEN - 1);
+  }
+  cleanName[MAX_SENDER_LEN - 1] = '\0';
+
+  // Si es una reunión que ya estaba en la cola, actualizar su tiempo en vez de duplicarla
+  if (type == NOTIF_MEET) {
+    for (uint8_t i = 0; i < notifCount; i++) {
+      if (notifQueue[i].type == NOTIF_MEET && strcmp(notifQueue[i].sender, cleanName) == 0) {
+        notifQueue[i].startOffsetMin = meetOffsetMin;
+        notifQueue[i].rxMillis       = millis();
+        if (meetOffsetMin <= 0) {
+          notifNeedsAttentionWiggle = true;
+        }
+        return;
+      }
+    }
+  }
+
   if (notifCount >= MAX_NOTIFS) {
     for (uint8_t i = 0; i < MAX_NOTIFS - 1; i++) {
       notifQueue[i] = notifQueue[i + 1];
@@ -332,20 +384,17 @@ void enqueueNotification(NotifType type, const char* senderRaw) {
   }
 
   NotifItem& item = notifQueue[notifCount];
-  item.type = type;
-
-  // Copiar remitente limpio (o texto por defecto si viene vacío)
-  while (*senderRaw == ' ' || *senderRaw == ':') {
-    senderRaw++;
-  }
-  if (*senderRaw == '\0') {
-    strncpy(item.sender, (type == NOTIF_MAIL) ? "Correo nuevo" : "Mensaje nuevo", MAX_SENDER_LEN - 1);
-  } else {
-    strncpy(item.sender, senderRaw, MAX_SENDER_LEN - 1);
-  }
+  item.type           = type;
+  item.startOffsetMin = meetOffsetMin;
+  item.rxMillis       = millis();
+  strncpy(item.sender, cleanName, MAX_SENDER_LEN);
   item.sender[MAX_SENDER_LEN - 1] = '\0';
 
   notifCount++;
+
+  if (type == NOTIF_MEET) {
+    notifNeedsAttentionWiggle = true;
+  }
 
   if (wasEmpty) {
     currentNotifIdx     = 0;
@@ -357,8 +406,26 @@ void enqueueNotification(NotifType type, const char* senderRaw) {
   }
 }
 
+void parseMeetingPayload(const char* payload) {
+  // Espera "<min>:<titulo>" (ej. "10:Coordinacion" o "-2:Daily")
+  while (*payload == ' ' || *payload == ':') {
+    payload++;
+  }
+  const char* colon = strchr(payload, ':');
+  if (colon != NULL) {
+    char numBuf[10];
+    size_t nlen = (size_t)(colon - payload);
+    if (nlen >= sizeof(numBuf)) nlen = sizeof(numBuf) - 1;
+    memcpy(numBuf, payload, nlen);
+    numBuf[nlen] = '\0';
+    int16_t mins = (int16_t)atoi(numBuf);
+    enqueueNotification(NOTIF_MEET, colon + 1, mins);
+  } else {
+    enqueueNotification(NOTIF_MEET, payload, 5);
+  }
+}
+
 void processBluetoothLine(char* line) {
-  // Quitar espacios/retornos al final
   int len = strlen(line);
   while (len > 0 && (line[len - 1] == '\r' || line[len - 1] == '\n' || line[len - 1] == ' ')) {
     line[--len] = '\0';
@@ -374,6 +441,9 @@ void processBluetoothLine(char* line) {
   } else if (cmd == 'C' || cmd == 'c' || cmd == 'H' || cmd == 'h') {
     enqueueNotification(NOTIF_CHAT, payload);
     Serial.println(F("OK:CHAT"));
+  } else if (cmd == 'R' || cmd == 'r' || cmd == 'K' || cmd == 'k') {
+    parseMeetingPayload(payload);
+    Serial.println(F("OK:MEET"));
   } else if (cmd == 'X' || cmd == 'x') {
     notifCount = 0;
     currentNotifIdx = 0;
@@ -400,11 +470,9 @@ void pollBluetooth() {
   }
 }
 
-// --- Desplazamiento de cualquier texto por la matriz 8x8 ---
-// Devuelve true si el usuario acercó la mano (<= 10 cm) durante el scroll
+// --- Desplazamiento de texto por la matriz 8x8 ---
 bool scrollText(const char* text, bool abortOnNear, bool abortOnNewNotifWhenIdle) {
-  // Expandir texto en arreglo temporal de columnas (máx ~190 columnas)
-  uint8_t cols[196];
+  uint8_t cols[250];
   int totalCols = 0;
 
   for (int i = 0; text[i] != '\0' && totalCols < (int)sizeof(cols) - 6; i++) {
@@ -413,7 +481,6 @@ bool scrollText(const char* text, bool abortOnNear, bool abortOnNewNotifWhenIdle
     for (uint8_t c = 0; c < w && totalCols < (int)sizeof(cols); c++) {
       cols[totalCols++] = gCols[c];
     }
-    // 1 columna de espacio entre letras (salvo que ya sea un espacio)
     if (text[i] != ' ' && text[i + 1] != '\0' && text[i + 1] != ' ' && totalCols < (int)sizeof(cols)) {
       cols[totalCols++] = 0x00;
     }
@@ -451,22 +518,17 @@ bool scrollText(const char* text, bool abortOnNear, bool abortOnNewNotifWhenIdle
   return false;
 }
 
-// --- Descarte de a UNO al acercar la mano (<= 10 cm) ---
 void dismissCurrentNotification() {
   if (notifCount == 0) return;
 
-  // Eliminar únicamente la notificación actual de la cola
   for (uint8_t i = currentNotifIdx; i + 1 < notifCount; i++) {
     notifQueue[i] = notifQueue[i + 1];
   }
   notifCount--;
 
-  // Mostrar tilde de confirmación (✔)
   setMatrixBrightness(10);
   showRows(ICON_CHECK);
 
-  // Mantener ✔ al menos 650 ms y esperar a que retire la mano (> 14 cm)
-  // para que un solo gesto borre exactamente UN mensaje y no varios seguidos
   unsigned long t0 = millis();
   while (millis() - t0 < 650UL) {
     pollBluetooth();
@@ -495,7 +557,7 @@ void dismissCurrentNotification() {
     lastNotifAnimMs = 0;
     notifAnimStep   = 0;
   } else {
-    currentNotifIdx = 0;
+    currentNotifIdx    = 0;
     clearScreen();
     pauseStartMs       = millis();
     nextObservePauseMs = pickRandomObservePauseMs();
@@ -564,10 +626,10 @@ bool panSmoothTo(int targetPulseUs, bool stopOnNear = true) {
   return false;
 }
 
-void renderActiveIcon(NotifType type) {
+void renderActiveIcon(const NotifItem& item) {
   unsigned long now = millis();
 
-  if (type == NOTIF_MAIL) {
+  if (item.type == NOTIF_MAIL) {
     showRows(ICON_EMAIL);
     if (now - lastNotifAnimMs >= 120UL) {
       lastNotifAnimMs = now;
@@ -575,7 +637,7 @@ void renderActiveIcon(NotifType type) {
       uint8_t tri = (notifAnimStep <= 10) ? notifAnimStep : (20 - notifAnimStep);
       setMatrixBrightness(2 + tri);
     }
-  } else if (type == NOTIF_CHAT) {
+  } else if (item.type == NOTIF_CHAT) {
     setMatrixBrightness(9);
     if (lastNotifAnimMs == 0 || now - lastNotifAnimMs >= 420UL) {
       lastNotifAnimMs = now;
@@ -588,6 +650,49 @@ void renderActiveIcon(NotifType type) {
         showRows(ICON_CHAT_2);
       }
     }
+  } else if (item.type == NOTIF_MEET) {
+    long remMin = currentMeetingRemainingMin(item);
+    // Si la reunión ya inició (o inicia ahora), la aguja del reloj gira más rápido
+    unsigned long tickMs = (remMin <= 0) ? 180UL : 340UL;
+    setMatrixBrightness((remMin <= 0) ? 12 : 9);
+    if (lastNotifAnimMs == 0 || now - lastNotifAnimMs >= tickMs) {
+      lastNotifAnimMs = now;
+      notifAnimStep = (notifAnimStep + 1) % 4;
+      if (notifAnimStep == 0) {
+        showRows(ICON_MEET_0);
+      } else if (notifAnimStep == 1) {
+        showRows(ICON_MEET_1);
+      } else if (notifAnimStep == 2) {
+        showRows(ICON_MEET_2);
+      } else {
+        showRows(ICON_MEET_3);
+      }
+    }
+  }
+}
+
+void buildNotifText(const NotifItem& item, uint8_t idx, uint8_t total, char* outBuf, size_t outSize) {
+  char prefix[10] = "";
+  if (total > 1) {
+    snprintf(prefix, sizeof(prefix), "%u/%u ", (unsigned)(idx + 1), (unsigned)total);
+  }
+
+  if (item.type == NOTIF_MEET) {
+    long remMin = currentMeetingRemainingMin(item);
+    if (remMin > 0) {
+      snprintf(outBuf, outSize, "%sEn %ldm: %s", prefix, remMin, item.sender);
+    } else if (remMin == 0) {
+      snprintf(outBuf, outSize, "%sInicia ya: %s", prefix, item.sender);
+    } else {
+      long pastMin = -remMin;
+      if (pastMin <= 99) {
+        snprintf(outBuf, outSize, "%sYa inici\x83 (%ldm): %s", prefix, pastMin, item.sender);
+      } else {
+        snprintf(outBuf, outSize, "%sYa inici\x83: %s", prefix, item.sender);
+      }
+    }
+  } else {
+    snprintf(outBuf, outSize, "%s%s", prefix, item.sender);
   }
 }
 
@@ -635,7 +740,6 @@ void loop() {
   stopMotors();
   pollBluetooth();
 
-  // Saludo remoto disparado por Bluetooth ('B')
   if (triggerRemoteBuenDia && notifCount == 0) {
     triggerRemoteBuenDia = false;
     scrollText(MSG_BUEN_DIA, false, true);
@@ -646,33 +750,44 @@ void loop() {
   }
 
   // ==========================================================================
-  // MODO COLA DE NOTIFICACIONES (Ícono -> Nombre remitente -> Siguiente...)
+  // MODO COLA DE NOTIFICACIONES (Mail ✉ / Chat 💬 / Reuniones ⏰)
   // ==========================================================================
   if (notifCount > 0) {
     if (currentNotifIdx >= notifCount) {
       currentNotifIdx = 0;
     }
 
-    if (notifNeedsCenterPan) {
-      notifNeedsCenterPan = false;
-      if (notifQueue[currentNotifIdx].type == NOTIF_MAIL) {
+    if (notifNeedsCenterPan || notifNeedsAttentionWiggle) {
+      NotifType t = notifQueue[currentNotifIdx].type;
+      if (t == NOTIF_MAIL) {
         showRows(ICON_EMAIL);
+      } else if (t == NOTIF_MEET) {
+        showRows(ICON_MEET_0);
       } else {
         showRows(ICON_CHAT_2);
       }
-      panSmoothTo(PULSE_CENTER_US, false);
+
+      if (notifNeedsAttentionWiggle) {
+        notifNeedsAttentionWiggle = false;
+        notifNeedsCenterPan       = false;
+        panSmoothTo(PULSE_CENTER_US - 95, false);
+        panSmoothTo(PULSE_CENTER_US + 95, false);
+        panSmoothTo(PULSE_CENTER_US, false);
+      } else {
+        notifNeedsCenterPan = false;
+        panSmoothTo(PULSE_CENTER_US, false);
+      }
       phaseStartMs    = millis();
       lastNotifAnimMs = 0;
     }
 
-    // Si acercas la mano a <= 10 cm, borra el mensaje actual y pasa al siguiente
     if (isSomeoneNear()) {
       dismissCurrentNotification();
       return;
     }
 
     if (notifPhase == PHASE_ICON) {
-      renderActiveIcon(notifQueue[currentNotifIdx].type);
+      renderActiveIcon(notifQueue[currentNotifIdx]);
 
       if (millis() - phaseStartMs >= ICON_HOLD_MS) {
         notifPhase = PHASE_TEXT;
@@ -682,20 +797,14 @@ void loop() {
       return;
     }
 
-    // PHASE_TEXT: armar etiqueta ("Sylvia" o "1/3 Sylvia" si hay varios)
-    char displayLine[36];
-    if (notifCount > 1) {
-      snprintf(
-        displayLine,
-        sizeof(displayLine),
-        "%u/%u %s",
-        (unsigned)(currentNotifIdx + 1),
-        (unsigned)notifCount,
-        notifQueue[currentNotifIdx].sender
-      );
-    } else {
-      snprintf(displayLine, sizeof(displayLine), "%s", notifQueue[currentNotifIdx].sender);
-    }
+    char displayLine[60];
+    buildNotifText(
+      notifQueue[currentNotifIdx],
+      currentNotifIdx,
+      notifCount,
+      displayLine,
+      sizeof(displayLine)
+    );
 
     bool handDetectedDuringScroll = scrollText(displayLine, true, false);
     if (handDetectedDuringScroll) {
@@ -703,7 +812,6 @@ void loop() {
       return;
     }
 
-    // Pasar al siguiente mensaje de la cola (o repetir si solo queda 1)
     if (notifCount > 0) {
       currentNotifIdx = (currentNotifIdx + 1) % notifCount;
       notifPhase      = PHASE_ICON;
