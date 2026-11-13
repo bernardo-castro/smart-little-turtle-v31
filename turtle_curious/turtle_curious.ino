@@ -242,6 +242,15 @@ const uint8_t ICON_SLEEP_1[8] PROGMEM = {
   0x80, 0x40, 0x00, 0x42, 0x24, 0x00, 0x18, 0x00
 };
 
+// Carita enojada ">:[" cuando alguien le tapa el frente 5 s (o /robot enojado)
+const uint8_t ICON_ANGRY_0[8] PROGMEM = {
+  0x00, 0x81, 0x42, 0x24, 0x66, 0x00, 0x3C, 0x00
+};
+
+const uint8_t ICON_ANGRY_1[8] PROGMEM = {
+  0x00, 0xC3, 0x24, 0x18, 0x66, 0x00, 0x42, 0x3C
+};
+
 // ============================================================================
 // FUENTE PROPORCIONAL 8 FILAS (bit 0 = arriba y=0, bit 7 = abajo y=7)
 //   0x80=á  0x81=é  0x82=í  0x83=ó  0x84=ú  0x85=ñ  0x86=Ñ  0x87=ü
@@ -1153,6 +1162,7 @@ void trackHandWithEyes() {
   int entryEdgeUs        = currentPulseUs;
   int centerTargetUs     = currentPulseUs;
   const int maxAccelX10  = 14; // Rampa suave de aceleración/frenado (1.4 µs/frame²)
+  unsigned long blockStartMs = 0;
 
   while (true) {
     unsigned long frameStartUs = micros();
@@ -1170,6 +1180,21 @@ void trackHandWithEyes() {
 
     float dist    = readTrackDistanceCm(state == TRK_LOCKED || state == TRK_SLIDE_CENTER);
     bool handSeen = (dist <= TRACK_HOLD_CM);
+
+    // Si alguien le deja la mano bloqueando de frente (<= 12.5 cm) por 5 s seguidos -> se enoja
+    if (state == TRK_LOCKED && dist <= 12.5f) {
+      if (blockStartMs == 0) {
+        blockStartMs = millis();
+      } else if (millis() - blockStartMs >= 5000UL) {
+        digitalWrite(SERVO_PIN, LOW);
+        triggerAngryTantrum(true);
+        if (notifCount > 0 || pendingRemoteKind != RCMD_NONE) return;
+        break;
+      }
+    } else {
+      blockStartMs = 0;
+    }
+
     bool atSearchLimit = ((trackDir < 0 && currentPulseUs <= TRACK_PULSE_MIN_US) ||
                           (trackDir > 0 && currentPulseUs >= TRACK_PULSE_MAX_US));
     int desiredVelX10 = 0;
@@ -1291,6 +1316,55 @@ void trackHandWithEyes() {
 
   if (notifCount == 0) {
     resumeLivingFaceSmooth();
+  }
+}
+
+void triggerAngryTantrum(bool stepBack) {
+  setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
+  showRowsP(ICON_ANGRY_0);
+
+  // Pequeña sacudida de molestia con la cabeza
+  int baseUs = currentPulseUs;
+  int leftUs = constrain(baseUs - 150, TRACK_PULSE_MIN_US, TRACK_PULSE_MAX_US);
+  int rightUs = constrain(baseUs + 150, TRACK_PULSE_MIN_US, TRACK_PULSE_MAX_US);
+  panSmoothTo(leftUs, false, false);
+  showRowsP(ICON_ANGRY_1);
+  panSmoothTo(rightUs, false, false);
+  showRowsP(ICON_ANGRY_0);
+  panSmoothTo(baseUs, false, false);
+
+  // Micro-pasito atrás indignado (con seguro antiborde IR)
+  if (stepBack && rawSensorsOnDesk()) {
+    setMotorsRaw(false, false, 165);
+    unsigned long bt0 = millis();
+    while (millis() - bt0 < 140UL) {
+      if (!rawSensorsOnDesk()) break;
+      delay(8);
+    }
+    stopMotors();
+  }
+
+  // Mantenerse gruñón mientras sigan tapándole el sensor de frente
+  uint8_t clearHits = 0;
+  unsigned long t0 = millis();
+  while (millis() - t0 < 8000UL) {
+    pollBluetooth();
+    if (isRobotLifted()) {
+      handleLiftedReaction();
+      return;
+    }
+    if (notifCount > 0 || pendingRemoteKind != RCMD_NONE) {
+      return;
+    }
+    showRowsP((((millis() / 260UL) % 2UL) == 0UL) ? ICON_ANGRY_0 : ICON_ANGRY_1);
+    float d = readTrackDistanceCm(false);
+    if (d > 14.0f) {
+      clearHits++;
+      if (clearHits >= 3) break;
+    } else {
+      clearHits = 0;
+    }
+    delay(45);
   }
 }
 
@@ -1513,6 +1587,13 @@ void executeNeckRemoteCmd(const char* arg) {
   } else if (c0 == 'R') {
     panSmoothTo(PULSE_MAX_US, false, (notifCount == 0));
     Serial.println(F("OK:N:R"));
+  } else if (c0 == 'A') {
+    // ANGRY (>:[)
+    for (uint8_t i = 0; i < 6; i++) {
+      showRowsP((i % 2 == 0) ? ICON_ANGRY_0 : ICON_ANGRY_1);
+      if (!waitRemoteGestureMs(280)) return;
+    }
+    Serial.println(F("OK:G:ANGRY"));
   } else if (c0 == 'C') {
     panSmoothTo(PULSE_CENTER_US, false, (notifCount == 0));
     Serial.println(F("OK:N:C"));
@@ -1601,6 +1682,13 @@ void executeGestureRemoteCmd(const char* arg) {
       if (!waitRemoteGestureMs(420)) return;
     }
     Serial.println(F("OK:G:THINK"));
+  } else if (c0 == 'A') {
+    // ANGRY (>:[)
+    for (uint8_t i = 0; i < 6; i++) {
+      showRowsP((i % 2 == 0) ? ICON_ANGRY_0 : ICON_ANGRY_1);
+      if (!waitRemoteGestureMs(280)) return;
+    }
+    Serial.println(F("OK:G:ANGRY"));
   } else if (c0 == 'C') {
     // CELEBRATE (^_^ + baile alegre de cuello)
     showRows(ICON_HAPPY);
