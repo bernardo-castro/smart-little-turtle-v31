@@ -55,18 +55,22 @@ const int TRACK_PULSE_MAX_US = 2020; // ~140° límite seguimiento de mano
 const int PULSE_STEP_US      = 7;    // Velocidad suave en reposo
 const int MIN_DELTA_US       = 260;  // Mínimo ~24° por giro aleatorio
 
-// --- Tiempos ---
-const unsigned long OBSERVE_MIN_MS = 5000UL;  // Pausa aleatoria mín: 5 s
-const unsigned long OBSERVE_MAX_MS = 30000UL; // Pausa aleatoria máx: 30 s
-const unsigned long ICON_HOLD_MS   = 1800UL;  // Segundos mostrando ícono antes del texto
-const unsigned long NOTIF_REST_MS  = 16000UL; // Pausa mostrando carita viva entre recordatorios
-const unsigned int  SCROLL_STEP_MS = 56;      // Velocidad ágil de desplazamiento de texto
+// --- Tiempos y Comportamiento Configurable en Vivo desde el Chat (/robot) ---
+unsigned long cfgObserveMinMs  = 5000UL;  // Pausa aleatoria mín: 5 s
+unsigned long cfgObserveMaxMs  = 30000UL; // Pausa aleatoria máx: 30 s
+unsigned long cfgIconHoldMs    = 1800UL;  // Segundos mostrando ícono antes del texto
+unsigned long cfgNotifRestMs   = 16000UL; // Pausa mostrando carita viva entre recordatorios
+unsigned int  cfgScrollStepMs  = 56;      // Velocidad ágil de desplazamiento de texto
+float         cfgTrackStartCm  = 15.0f;   // Distancia enganche de mano (0 = desactivado)
+bool          cfgPanEnabled    = true;    // Paneos aleatorios curiosos en reposo
+unsigned long cfgNearTriggerMs = 5000UL;  // Tiempo frente al sensor para disparar regla (0 = off)
+bool          cfgAngryStepBack = true;    // Micro-paso atrás al enojarse
+char          cfgNearAction[28] = "ANGRY"; // Acción al disparar regla de proximidad
 
 // --- Sensor Ultrasónico ---
 const int   TRIG_PIN        = 12;
 const int   ECHO_PIN        = 13;
 const float NEAR_DETECT_CM  = 10.0f; // Distancia para borrar avisos (<= 10 cm)
-const float TRACK_START_CM  = 15.0f; // Distancia cómoda para enganchar tu mano en reposo
 const float TRACK_HOLD_CM   = 28.0f; // Rango de seguimiento activo una vez enganchada
 
 // --- Sensores Infrarrojos Inferiores (detector de levantamiento de la mesa) ---
@@ -117,7 +121,7 @@ unsigned long lastNotifAnimMs  = 0;
 int notifAnimStep              = 0;
 
 // Buffer de recepción serie no bloqueante + cola de comando remoto /robot
-char rxBuf[52];
+char rxBuf[72];
 uint8_t rxLen = 0;
 bool triggerRemoteBuenDia = false;
 
@@ -126,11 +130,12 @@ enum RemoteCmdKind : uint8_t {
   RCMD_WHEEL   = 1,
   RCMD_NECK    = 2,
   RCMD_GESTURE = 3,
-  RCMD_TEXT    = 4
+  RCMD_TEXT    = 4,
+  RCMD_PIXELS  = 5
 };
 
 RemoteCmdKind pendingRemoteKind = RCMD_NONE;
-char pendingRemotePayload[36]   = "";
+char pendingRemotePayload[56]   = "";
 bool isSleeping                 = false;
 bool motorFlipForward           = false;
 
@@ -151,7 +156,9 @@ unsigned long blinkStepStartMs   = 0;
 unsigned long nextBlinkAtMs      = 0;
 
 unsigned long pickRandomObservePauseMs() {
-  return (unsigned long)random(OBSERVE_MIN_MS, OBSERVE_MAX_MS + 1UL);
+  unsigned long mn = cfgObserveMinMs;
+  unsigned long mx = (cfgObserveMaxMs >= mn) ? cfgObserveMaxMs : mn;
+  return (unsigned long)random(mn, mx + 1UL);
 }
 
 unsigned long pickRandomBlinkDelayMs() {
@@ -601,13 +608,16 @@ bool isSomeoneNear() {
 }
 
 bool isHandReadyToTrack() {
+  if (cfgTrackStartCm <= 0.5f) {
+    return false;
+  }
   float d1 = readDistanceFastCm();
-  if (d1 > TRACK_START_CM) {
+  if (d1 > cfgTrackStartCm) {
     return false;
   }
   delay(8);
   float d2 = readDistanceFastCm();
-  return (d2 <= TRACK_START_CM + 2.0f);
+  return (d2 <= cfgTrackStartCm + 2.0f);
 }
 
 // Lectura rápida para bucle de seguimiento 50 Hz (timeout corto ~36 cm)
@@ -849,6 +859,25 @@ void parseMeetingPayload(const char* payload) {
   }
 }
 
+void resetConfigDefaults() {
+  cfgObserveMinMs  = 5000UL;
+  cfgObserveMaxMs  = 30000UL;
+  cfgIconHoldMs    = 1800UL;
+  cfgNotifRestMs   = 16000UL;
+  cfgScrollStepMs  = 56;
+  cfgTrackStartCm  = 15.0f;
+  cfgPanEnabled    = true;
+  cfgNearTriggerMs = 5000UL;
+  cfgAngryStepBack = true;
+  strcpy(cfgNearAction, "ANGRY");
+}
+
+void toUpperAscii(char* s) {
+  for (; *s; s++) {
+    if (*s >= 'a' && *s <= 'z') *s = *s - 'a' + 'A';
+  }
+}
+
 void printRobotStatus() {
   float d = readDistanceFastCm();
   Serial.print(F("STAT:DIST="));
@@ -866,7 +895,109 @@ void printRobotStatus() {
   Serial.print(F(",NOTIF="));
   Serial.print((int)notifCount);
   Serial.print(F(",SLEEP="));
-  Serial.println(isSleeping ? 1 : 0);
+  Serial.print(isSleeping ? 1 : 0);
+  Serial.print(F(",ANGRY="));
+  Serial.print(cfgNearTriggerMs);
+  Serial.print(F(",ACT="));
+  Serial.print(cfgNearAction);
+  Serial.print(F(",REST="));
+  Serial.print(cfgNotifRestMs);
+  Serial.print(F(",TRACK="));
+  Serial.print((int)cfgTrackStartCm);
+  Serial.print(F(",PAN="));
+  Serial.println(cfgPanEnabled ? 1 : 0);
+}
+
+void applySettingCmd(const char* rawPayload) {
+  while (*rawPayload == ' ' || *rawPayload == ':') rawPayload++;
+  char buf[52];
+  strncpy(buf, rawPayload, sizeof(buf) - 1);
+  buf[sizeof(buf) - 1] = '\0';
+
+  char* eq = strchr(buf, '=');
+  if (eq == NULL) {
+    toUpperAscii(buf);
+    if (strcmp(buf, "RESET") == 0) {
+      resetConfigDefaults();
+      Serial.println(F("OK:S:RESET"));
+    } else {
+      Serial.println(F("ERR:S:FORMAT"));
+    }
+    return;
+  }
+
+  *eq = '\0';
+  char* key = buf;
+  char* valStr = eq + 1;
+  toUpperAscii(key);
+  long val = atol(valStr);
+
+  if (strcmp(key, "ANGRY") == 0) {
+    cfgNearTriggerMs = (val <= 0) ? 0UL : (unsigned long)constrain(val, 500L, 60000L);
+  } else if (strcmp(key, "ANGRYSTEP") == 0) {
+    cfgAngryStepBack = (val != 0);
+  } else if (strcmp(key, "REST") == 0) {
+    cfgNotifRestMs = (unsigned long)constrain(val, 2000L, 120000L);
+  } else if (strcmp(key, "ICON") == 0) {
+    cfgIconHoldMs = (unsigned long)constrain(val, 500L, 10000L);
+  } else if (strcmp(key, "SCROLL") == 0) {
+    cfgScrollStepMs = (unsigned int)constrain(val, 25L, 160L);
+  } else if (strcmp(key, "TRACK") == 0) {
+    cfgTrackStartCm = (val <= 0) ? 0.0f : (float)constrain(val, 6L, 24L);
+  } else if (strcmp(key, "PAN") == 0) {
+    cfgPanEnabled = (val != 0);
+  } else if (strcmp(key, "OBSMIN") == 0) {
+    cfgObserveMinMs = (unsigned long)constrain(val, 1500L, 120000L);
+  } else if (strcmp(key, "OBSMAX") == 0) {
+    cfgObserveMaxMs = (unsigned long)constrain(val, 2000L, 180000L);
+  } else {
+    Serial.println(F("ERR:S:KEY"));
+    return;
+  }
+  Serial.print(F("OK:S:"));
+  Serial.print(key);
+  Serial.print('=');
+  Serial.println(val);
+}
+
+void applyAutomationCmd(const char* rawPayload) {
+  while (*rawPayload == ' ' || *rawPayload == ':') rawPayload++;
+  char buf[52];
+  strncpy(buf, rawPayload, sizeof(buf) - 1);
+  buf[sizeof(buf) - 1] = '\0';
+
+  if (strncasecmp(buf, "OFF", 3) == 0) {
+    cfgNearTriggerMs = 0;
+    Serial.println(F("OK:A:OFF"));
+    return;
+  }
+
+  // Espera "NEAR:<ms>:<ACCION>" (ej. "NEAR:3000:ANGRY" o "NEAR:2000:T:Hola!")
+  if (strncasecmp(buf, "NEAR:", 5) == 0) {
+    char* pMs = buf + 5;
+    char* pAct = strchr(pMs, ':');
+    if (pAct != NULL) {
+      *pAct = '\0';
+      pAct++;
+      long msVal = atol(pMs);
+      cfgNearTriggerMs = (msVal <= 0) ? 0UL : (unsigned long)constrain(msVal, 500L, 60000L);
+      while (*pAct == ' ') pAct++;
+      strncpy(cfgNearAction, pAct, sizeof(cfgNearAction) - 1);
+      cfgNearAction[sizeof(cfgNearAction) - 1] = '\0';
+      // Normaliza a mayúsculas solo si no es texto libre "T:..."
+      if (!(cfgNearAction[0] == 'T' || cfgNearAction[0] == 't') || cfgNearAction[1] != ':') {
+        toUpperAscii(cfgNearAction);
+      } else {
+        cfgNearAction[0] = 'T';
+      }
+      Serial.print(F("OK:A:NEAR:"));
+      Serial.print(cfgNearTriggerMs);
+      Serial.print(':');
+      Serial.println(cfgNearAction);
+      return;
+    }
+  }
+  Serial.println(F("ERR:A:FORMAT"));
 }
 
 void queueRemoteCmd(RemoteCmdKind kind, const char* payload) {
@@ -913,6 +1044,12 @@ void processBluetoothLine(char* line) {
     queueRemoteCmd(RCMD_GESTURE, payload);
   } else if (cmd == 'T' || cmd == 't') {
     queueRemoteCmd(RCMD_TEXT, payload);
+  } else if (cmd == 'P' || cmd == 'p') {
+    queueRemoteCmd(RCMD_PIXELS, payload);
+  } else if (cmd == 'S' || cmd == 's') {
+    applySettingCmd(payload);
+  } else if (cmd == 'A' || cmd == 'a') {
+    applyAutomationCmd(payload);
   } else if (cmd == 'Q' || cmd == 'q') {
     printRobotStatus();
   }
@@ -982,7 +1119,7 @@ bool scrollText(const char* text, bool abortOnNear, bool abortOnNewNotifWhenIdle
     }
 
     showRows(rows);
-    delay(SCROLL_STEP_MS);
+    delay(cfgScrollStepMs);
   }
 
   return false;
@@ -1094,8 +1231,8 @@ bool panSmoothTo(int targetPulseUs, bool stopOnNear = true, bool animateFace = f
       updateLivingFace();
     }
 
-    if (stopOnNear) {
-      if (readDistanceFastCm() <= TRACK_START_CM) {
+    if (stopOnNear && cfgTrackStartCm > 0.5f) {
+      if (readDistanceFastCm() <= cfgTrackStartCm) {
         nearHits++;
         if (nearHits >= 2) {
           digitalWrite(SERVO_PIN, LOW);
@@ -1150,6 +1287,8 @@ enum TrackState : uint8_t {
   TRK_SETTLE       = 5
 };
 
+void executeNearTriggerAction();
+
 void trackHandWithEyes() {
   static int8_t lastGoodDir = 1;
 
@@ -1181,13 +1320,13 @@ void trackHandWithEyes() {
     float dist    = readTrackDistanceCm(state == TRK_LOCKED || state == TRK_SLIDE_CENTER);
     bool handSeen = (dist <= TRACK_HOLD_CM);
 
-    // Si alguien le deja la mano bloqueando de frente (<= 12.5 cm) por 5 s seguidos -> se enoja
-    if (state == TRK_LOCKED && dist <= 12.5f) {
+    // Si alguien le deja la mano bloqueando de frente (<= 12.5 cm) por cfgNearTriggerMs -> dispara acción
+    if (cfgNearTriggerMs > 0 && state == TRK_LOCKED && dist <= 12.5f) {
       if (blockStartMs == 0) {
         blockStartMs = millis();
-      } else if (millis() - blockStartMs >= 5000UL) {
+      } else if (millis() - blockStartMs >= cfgNearTriggerMs) {
         digitalWrite(SERVO_PIN, LOW);
-        triggerAngryTantrum(true);
+        executeNearTriggerAction();
         if (notifCount > 0 || pendingRemoteKind != RCMD_NONE) return;
         break;
       }
@@ -1714,11 +1853,74 @@ void executeGestureRemoteCmd(const char* arg) {
   nextObservePauseMs = pickRandomObservePauseMs();
 }
 
+static int8_t hexNibble(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  return -1;
+}
+
+void executePixelsRemoteCmd(const char* arg) {
+  uint8_t rows[8];
+  for (uint8_t r = 0; r < 8; r++) {
+    int8_t hi = hexNibble(arg[r * 2]);
+    int8_t lo = hexNibble(arg[r * 2 + 1]);
+    if (hi < 0 || lo < 0) {
+      Serial.println(F("ERR:P:HEX"));
+      return;
+    }
+    rows[r] = (uint8_t)((hi << 4) | lo);
+  }
+
+  unsigned long holdMs = 2500UL;
+  if (arg[16] == ':' && arg[17] != '\0') {
+    long v = atol(arg + 17);
+    if (v <= 0) {
+      holdMs = 0;
+    } else {
+      holdMs = (unsigned long)constrain(v, 100L, 30000L);
+    }
+  }
+
+  isSleeping = false;
+  setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
+  showRows(rows);
+  Serial.println(F("OK:P"));
+
+  if (holdMs > 0) {
+    if (!waitRemoteGestureMs(holdMs)) return;
+    if ((notifCount == 0 || notifPhase == PHASE_REST) && pendingRemoteKind == RCMD_NONE) {
+      resumeLivingFaceSmooth();
+      if (notifPhase == PHASE_REST) {
+        phaseStartMs = millis();
+      }
+    }
+  }
+}
+
+void executeNearTriggerAction() {
+  if (strcmp(cfgNearAction, "ANGRY") == 0 || cfgNearAction[0] == '\0') {
+    triggerAngryTantrum(cfgAngryStepBack);
+  } else if (strcmp(cfgNearAction, "BACK") == 0) {
+    driveSafeWheelStep("B:220");
+  } else if (strcmp(cfgNearAction, "NO") == 0) {
+    executeNeckRemoteCmd("NO");
+  } else if (cfgNearAction[0] == 'T' && cfgNearAction[1] == ':') {
+    isSleeping = false;
+    scrollText(cfgNearAction + 2, false, false);
+    if ((notifCount == 0 || notifPhase == PHASE_REST) && pendingRemoteKind == RCMD_NONE) {
+      resumeLivingFaceSmooth();
+    }
+  } else {
+    executeGestureRemoteCmd(cfgNearAction);
+  }
+}
+
 void executePendingRemoteCommand() {
   RemoteCmdKind kind = pendingRemoteKind;
   if (kind == RCMD_NONE) return;
 
-  char argCopy[36];
+  char argCopy[56];
   strncpy(argCopy, pendingRemotePayload, sizeof(argCopy) - 1);
   argCopy[sizeof(argCopy) - 1] = '\0';
   pendingRemoteKind = RCMD_NONE;
@@ -1731,6 +1933,8 @@ void executePendingRemoteCommand() {
     executeNeckRemoteCmd(argCopy);
   } else if (kind == RCMD_GESTURE) {
     executeGestureRemoteCmd(argCopy);
+  } else if (kind == RCMD_PIXELS) {
+    executePixelsRemoteCmd(argCopy);
   } else if (kind == RCMD_TEXT) {
     isSleeping = false;
     if (argCopy[0] != '\0') {
@@ -1835,7 +2039,7 @@ void loop() {
         }
       }
 
-      if (millis() - phaseStartMs >= NOTIF_REST_MS) {
+      if (millis() - phaseStartMs >= cfgNotifRestMs) {
         beginNotifPhaseIcon((currentNotifIdx + 1) % notifCount, true);
       } else {
         delay(20);
@@ -1876,7 +2080,7 @@ void loop() {
     if (notifPhase == PHASE_ICON) {
       renderActiveIcon(notifQueue[currentNotifIdx]);
 
-      if (millis() - phaseStartMs >= ICON_HOLD_MS) {
+      if (millis() - phaseStartMs >= cfgIconHoldMs) {
         notifPhase = PHASE_TEXT;
       } else {
         delay(35);
@@ -1948,9 +2152,26 @@ void loop() {
       nextObservePauseMs = pickRandomObservePauseMs();
       return;
     }
+    if (cfgTrackStartCm <= 0.5f && cfgNearTriggerMs > 0) {
+      static unsigned long idleNearStartMs = 0;
+      float d = readDistanceFastCm();
+      if (d <= 12.5f) {
+        if (idleNearStartMs == 0) {
+          idleNearStartMs = millis();
+        } else if (millis() - idleNearStartMs >= cfgNearTriggerMs) {
+          idleNearStartMs = 0;
+          executeNearTriggerAction();
+          pauseStartMs       = millis();
+          nextObservePauseMs = pickRandomObservePauseMs();
+          return;
+        }
+      } else {
+        idleNearStartMs = 0;
+      }
+    }
   }
 
-  if (millis() - pauseStartMs >= nextObservePauseMs) {
+  if (cfgPanEnabled && millis() - pauseStartMs >= nextObservePauseMs) {
     int randomTargetUs = pickRandomTargetUs();
     bool spottedSomeone = panSmoothTo(randomTargetUs, true, true);
 

@@ -129,6 +129,10 @@ Una vez finalizada la carga, apaga el robot, inserta nuevamente el módulo **DX-
   - `[c:Ana]` + Enter → Probar aviso de **Chat (`💬`)** con remitente
   - `[r:10:Planificacion]` + Enter → Probar **Reunión (`⏰`)** que inicia en 10 min
   - `[r:0:Daily]` + Enter → Probar **Reunión (`⏰`)** que inicia ahora mismo
+- **Comandos abiertos en vivo (`pc_bluetooth_bridge\robot_ctl.py`):**
+  - `robot_ctl.py "P:<16_hex>[:ms]"` → Dibuja cualquier patrón `8x8` personalizado en la matriz LED sin re-flashear.
+  - `robot_ctl.py "A:NEAR:<ms>:<ACCION>"` / `"A:OFF"` → Programa en caliente qué hace si le tapan el frente por `<ms>` (`ANGRY`, `HAPPY`, `HEART`, `SURPRISE`, `CELEBRATE`, `BACK`, `NO`, `T:<texto>`).
+  - `robot_ctl.py "S:<CLAVE>=<VALOR>"` / `"S:RESET"` → Ajusta tiempos y comportamientos al instante (`ANGRY`, `ANGRYSTEP`, `REST`, `ICON`, `SCROLL`, `TRACK`, `PAN`, `OBSMIN`, `OBSMAX`).
   - `[r:-4:Coordinacion]` + Enter → Probar **Reunión (`⏰`)** que ya inició hace 4 min
   - `[b]` + Enter → Disparar saludo **`"Buen día!"`**
   - `[x]` + Enter → Vaciar toda la cola de notificaciones
