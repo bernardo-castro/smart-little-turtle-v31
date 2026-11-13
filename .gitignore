@@ -3,6 +3,12 @@
 sent_state.json
 calendar_config.json
 lanzar_silencioso.vbs
+cmd_inbox.jsonl
+cmd_inbox.jsonl.processing
+cmd_reply.json
+cmd_reply.json.tmp
+bridge_heartbeat.json
+bridge_heartbeat.json.tmp
 __pycache__/
 *.py[cod]
 .venv/

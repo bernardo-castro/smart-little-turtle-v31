@@ -11,18 +11,26 @@
 //    - Parpadeo orgánico multi-etapa (párpado baja y sube fila por fila cada
 //      2.6~5.6 s, con doble pestañeo ocasional) y giro amortiguado (5~30 s).
 //    - Al acercar la mano (<= 12 cm): sigue tu mano con el cuello y desplaza
-//      la cara sincronizada con el ángulo real; al retirarla hace guiño/sonrisa
-//      y reabre suavemente sus ojos en el ángulo actual.
+//      la cara sincronizada con el ángulo real; al retirarla sonríe "^_^"
+//      (sin guiñar) y reabre suavemente sus ojos en el ángulo actual.
 //    - Si levantas el robot de la mesa: pone cara "O_o" / "o_O" al instante.
 //
-// 2) COLA DE NOTIFICACIONES BLUETOOTH DX-BT24 (UART 9600 bps en RX/TX):
+// 2) COLA AGRUPADA DE NOTIFICACIONES BLUETOOTH DX-BT24 (UART 9600 bps):
 //    - Íconos en brillo 15; textos y gestos en brillo 8:
-//        "M:<Remitente>\n"        -> EMAIL (✉) + nombre del remitente
-//        "C:<Remitente>\n"        -> CHAT  (💬) + nombre del remitente
+//        "M:<Remitente>\n"        -> EMAIL (✉) agrupado por remitente (xN)
+//        "C:<Remitente>\n"        -> CHAT  (💬) agrupado por remitente (xN)
 //        "R:<Min>:<Reunión>\n"    -> REUNIÓN (⏰) con cuenta regresiva viva
 //        "X\n"                    -> Limpia toda la cola
 //        "B\n"                    -> Saludo remoto "Buen día!"
-//    - Acercar la mano (<= 10 cm) con avisos activos muestra ✔ y borra de a UNO.
+//    - Acercar la mano (<= 10 cm) con avisos activos muestra ✔ y limpia TODAS
+//      las notificaciones pendientes de esa misma persona por nombre.
+//
+// 3) CONTROL DIRECTO DESDE ANTIGRAVITY (/robot) VÍA BLUETOOTH:
+//        "W:<F|B|L|R|S|INV>[:ms]" -> Micro-paso seguro con freno anti-caídas
+//        "N:<L|C|R|NO|SCAN|deg>"  -> Mover cuello + cara sincronizada
+//        "G:<HAPPY|SURPRISE|HEART|THINK|CELEBRATE|SLEEP|WAKE>" -> Gestos/Sueño
+//        "T:<Mensaje>"            -> Mostrar texto libre en matriz 8x8
+//        "Q"                      -> Telemetría instantánea de sensores
 // ============================================================================
 
 #include <Wire.h>
@@ -90,6 +98,7 @@ const uint8_t MAX_SENDER_LEN = 24;
 
 struct NotifItem {
   NotifType type;
+  uint8_t count;              // Cantidad de mensajes agrupados de este remitente
   int16_t startOffsetMin;     // Para NOTIF_MEET: minutos hasta iniciar al recibirlo
   unsigned long rxMillis;     // millis() al recibirlo para descontar en vivo
   char sender[MAX_SENDER_LEN];
@@ -106,15 +115,27 @@ unsigned long phaseStartMs     = 0;
 unsigned long lastNotifAnimMs  = 0;
 int notifAnimStep              = 0;
 
-// Buffer de recepción serie no bloqueante
-char rxBuf[48];
+// Buffer de recepción serie no bloqueante + cola de comando remoto /robot
+char rxBuf[52];
 uint8_t rxLen = 0;
 bool triggerRemoteBuenDia = false;
+
+enum RemoteCmdKind : uint8_t {
+  RCMD_NONE    = 0,
+  RCMD_WHEEL   = 1,
+  RCMD_NECK    = 2,
+  RCMD_GESTURE = 3,
+  RCMD_TEXT    = 4
+};
+
+RemoteCmdKind pendingRemoteKind = RCMD_NONE;
+char pendingRemotePayload[36]   = "";
+bool isSleeping                 = false;
+bool motorFlipForward           = false;
 
 int currentPulseUs               = PULSE_CENTER_US;
 unsigned long pauseStartMs       = 0;
 unsigned long nextObservePauseMs = 15000UL;
-int8_t lastGoodbyeGesture        = 0;
 
 // --- Estado de Cara Viva Permanente Sincronizada al Ángulo del Ultrasonido ---
 uint8_t currentMatrixBrightness  = 255;
@@ -191,30 +212,33 @@ const uint8_t ICON_HAPPY[8] = {
   0x00, 0x42, 0xA5, 0x00, 0x00, 0x42, 0x3C, 0x00
 };
 
-// Ojos dinámicos para seguimiento de mano (orientan la mirada según dirección)
-// Centro: ojos centrados mirando al frente
-const uint8_t ICON_TRACK_CENTER[8] = {
-  0x00, 0x66, 0x66, 0x66, 0x66, 0x00, 0x18, 0x00
+// Íconos adicionales en PROGMEM para gestos /robot (0 bytes de RAM)
+const uint8_t ICON_HEART_BIG[8] PROGMEM = {
+  0x00, 0x66, 0xFF, 0xFF, 0xFF, 0x7E, 0x3C, 0x18
 };
 
-// Mirando hacia x=0 (cuando el cuello gira hacia PULSE_MIN_US)
-const uint8_t ICON_TRACK_LEFT[8] = {
-  0x00, 0x03, 0x33, 0x33, 0x33, 0x00, 0x0C, 0x00
+const uint8_t ICON_HEART_SMALL[8] PROGMEM = {
+  0x00, 0x00, 0x24, 0x7E, 0x7E, 0x3C, 0x18, 0x00
 };
 
-// Mirando hacia x=7 (cuando el cuello gira hacia PULSE_MAX_US)
-const uint8_t ICON_TRACK_RIGHT[8] = {
-  0x00, 0xC0, 0xCC, 0xCC, 0xCC, 0x00, 0x30, 0x00
+const uint8_t ICON_THINK_0[8] PROGMEM = {
+  0x66, 0x66, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00
 };
 
-// Parpadeo suave mientras observa tu mano
-const uint8_t ICON_TRACK_BLINK[8] = {
-  0x00, 0x00, 0x00, 0x66, 0x00, 0x00, 0x18, 0x00
+const uint8_t ICON_THINK_1[8] PROGMEM = {
+  0x66, 0x66, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00
 };
 
-// Guiño de despedida al retirar la mano
-const uint8_t ICON_WINK[8] = {
-  0x00, 0x06, 0x07, 0xE7, 0x06, 0x40, 0x3C, 0x00
+const uint8_t ICON_THINK_2[8] PROGMEM = {
+  0x66, 0x66, 0x00, 0x00, 0x00, 0x00, 0x54, 0x00
+};
+
+const uint8_t ICON_SLEEP_0[8] PROGMEM = {
+  0x00, 0x00, 0x00, 0x42, 0x24, 0x00, 0x18, 0x00
+};
+
+const uint8_t ICON_SLEEP_1[8] PROGMEM = {
+  0x80, 0x40, 0x00, 0x42, 0x24, 0x00, 0x18, 0x00
 };
 
 // ============================================================================
@@ -383,6 +407,14 @@ void writeMatrixRowsRaw(const uint8_t rowsTopToBottom[8]) {
 void showRows(const uint8_t rowsTopToBottom[8]) {
   faceRenderDirty = true;
   writeMatrixRowsRaw(rowsTopToBottom);
+}
+
+void showRowsP(const uint8_t iconProgmem[8]) {
+  uint8_t buf[8];
+  for (uint8_t i = 0; i < 8; i++) {
+    buf[i] = pgm_read_byte(&iconProgmem[i]);
+  }
+  showRows(buf);
 }
 
 void clearScreen() {
@@ -682,9 +714,24 @@ long currentMeetingRemainingMin(const NotifItem& item) {
   return (long)item.startOffsetMin - elapsedMin;
 }
 
-// --- Gestión de Cola de Notificaciones ---
+// Comparación insensible a mayúsculas ASCII (conservando acentos 0x80..0x87)
+bool sameSenderName(const char* a, const char* b) {
+  while (*a != '\0' && *b != '\0') {
+    uint8_t ca = (uint8_t)(*a);
+    uint8_t cb = (uint8_t)(*b);
+    if (ca >= 'A' && ca <= 'Z') ca = ca - 'A' + 'a';
+    if (cb >= 'A' && cb <= 'Z') cb = cb - 'A' + 'a';
+    if (ca != cb) return false;
+    a++;
+    b++;
+  }
+  return (*a == '\0' && *b == '\0');
+}
+
+// --- Gestión de Cola de Notificaciones (con agrupación por remitente) ---
 void enqueueNotification(NotifType type, const char* senderRaw, int16_t meetOffsetMin = 0) {
   bool wasEmpty = (notifCount == 0);
+  isSleeping = false;
 
   while (*senderRaw == ' ' || *senderRaw == ':') {
     senderRaw++;
@@ -707,11 +754,21 @@ void enqueueNotification(NotifType type, const char* senderRaw, int16_t meetOffs
   // Si es una reunión que ya estaba en la cola, actualizar su tiempo en vez de duplicarla
   if (type == NOTIF_MEET) {
     for (uint8_t i = 0; i < notifCount; i++) {
-      if (notifQueue[i].type == NOTIF_MEET && strcmp(notifQueue[i].sender, cleanName) == 0) {
+      if (notifQueue[i].type == NOTIF_MEET && sameSenderName(notifQueue[i].sender, cleanName)) {
         notifQueue[i].startOffsetMin = meetOffsetMin;
         notifQueue[i].rxMillis       = millis();
         if (meetOffsetMin <= 0) {
           notifNeedsAttentionWiggle = true;
+        }
+        return;
+      }
+    }
+  } else {
+    // Si la misma persona envía varios mensajes del mismo tipo, agruparlos en uno solo (xN)
+    for (uint8_t i = 0; i < notifCount; i++) {
+      if (notifQueue[i].type == type && sameSenderName(notifQueue[i].sender, cleanName)) {
+        if (notifQueue[i].count < 99) {
+          notifQueue[i].count++;
         }
         return;
       }
@@ -730,6 +787,7 @@ void enqueueNotification(NotifType type, const char* senderRaw, int16_t meetOffs
 
   NotifItem& item = notifQueue[notifCount];
   item.type           = type;
+  item.count          = 1;
   item.startOffsetMin = meetOffsetMin;
   item.rxMillis       = millis();
   strncpy(item.sender, cleanName, MAX_SENDER_LEN);
@@ -770,6 +828,35 @@ void parseMeetingPayload(const char* payload) {
   }
 }
 
+void printRobotStatus() {
+  float d = readDistanceFastCm();
+  Serial.print(F("STAT:DIST="));
+  if (d >= 900.0f) {
+    Serial.print(F("LIBRE"));
+  } else {
+    Serial.print((int)(d + 0.5f));
+  }
+  Serial.print(F(",DESK="));
+  Serial.print(rawSensorsOnDesk() ? 1 : 0);
+  Serial.print(F(",PULSE="));
+  Serial.print(currentPulseUs);
+  Serial.print(F(",ZONE="));
+  Serial.print((int)gazeZoneFromPulseUs(currentPulseUs, currentGaze));
+  Serial.print(F(",NOTIF="));
+  Serial.print((int)notifCount);
+  Serial.print(F(",SLEEP="));
+  Serial.println(isSleeping ? 1 : 0);
+}
+
+void queueRemoteCmd(RemoteCmdKind kind, const char* payload) {
+  while (*payload == ' ' || *payload == ':') {
+    payload++;
+  }
+  strncpy(pendingRemotePayload, payload, sizeof(pendingRemotePayload) - 1);
+  pendingRemotePayload[sizeof(pendingRemotePayload) - 1] = '\0';
+  pendingRemoteKind = kind;
+}
+
 void processBluetoothLine(char* line) {
   int len = strlen(line);
   while (len > 0 && (line[len - 1] == '\r' || line[len - 1] == '\n' || line[len - 1] == ' ')) {
@@ -797,6 +884,16 @@ void processBluetoothLine(char* line) {
   } else if (cmd == 'B' || cmd == 'b') {
     triggerRemoteBuenDia = true;
     Serial.println(F("OK:BUENDIA"));
+  } else if (cmd == 'W' || cmd == 'w') {
+    queueRemoteCmd(RCMD_WHEEL, payload);
+  } else if (cmd == 'N' || cmd == 'n') {
+    queueRemoteCmd(RCMD_NECK, payload);
+  } else if (cmd == 'G' || cmd == 'g') {
+    queueRemoteCmd(RCMD_GESTURE, payload);
+  } else if (cmd == 'T' || cmd == 't') {
+    queueRemoteCmd(RCMD_TEXT, payload);
+  } else if (cmd == 'Q' || cmd == 'q') {
+    printRobotStatus();
   }
 }
 
@@ -840,6 +937,9 @@ bool scrollText(const char* text, bool abortOnNear, bool abortOnNewNotifWhenIdle
       handleLiftedReaction();
       return false;
     }
+    if (pendingRemoteKind != RCMD_NONE) {
+      return false;
+    }
     if (abortOnNewNotifWhenIdle && notifCount > 0) {
       return false;
     }
@@ -870,10 +970,21 @@ bool scrollText(const char* text, bool abortOnNear, bool abortOnNewNotifWhenIdle
 void dismissCurrentNotification() {
   if (notifCount == 0) return;
 
-  for (uint8_t i = currentNotifIdx; i + 1 < notifCount; i++) {
-    notifQueue[i] = notifQueue[i + 1];
+  // Limpiar TODAS las notificaciones que pertenezcan a esta misma persona por nombre
+  char targetName[MAX_SENDER_LEN];
+  strncpy(targetName, notifQueue[currentNotifIdx].sender, MAX_SENDER_LEN - 1);
+  targetName[MAX_SENDER_LEN - 1] = '\0';
+
+  uint8_t writeIdx = 0;
+  for (uint8_t readIdx = 0; readIdx < notifCount; readIdx++) {
+    if (!sameSenderName(notifQueue[readIdx].sender, targetName)) {
+      if (writeIdx != readIdx) {
+        notifQueue[writeIdx] = notifQueue[readIdx];
+      }
+      writeIdx++;
+    }
   }
-  notifCount--;
+  notifCount = writeIdx;
 
   setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
   showRows(ICON_CHECK);
@@ -941,7 +1052,7 @@ bool panSmoothTo(int targetPulseUs, bool stopOnNear = true, bool animateFace = f
     unsigned long frameStartUs = micros();
 
     pollBluetooth();
-    if (stopOnNear && (notifCount > 0 || !rawSensorsOnDesk())) {
+    if (stopOnNear && (notifCount > 0 || pendingRemoteKind != RCMD_NONE || !rawSensorsOnDesk())) {
       digitalWrite(SERVO_PIN, LOW);
       return false;
     }
@@ -1038,7 +1149,7 @@ void trackHandWithEyes() {
       handleLiftedReaction();
       return;
     }
-    if (notifCount > 0) {
+    if (notifCount > 0 || pendingRemoteKind != RCMD_NONE) {
       digitalWrite(SERVO_PIN, LOW);
       return;
     }
@@ -1133,16 +1244,10 @@ void trackHandWithEyes() {
 
   digitalWrite(SERVO_PIN, LOW);
 
-  // Despedida simpática al retirar la mano (alterna guiño y sonrisa en brillo 8)
+  // Despedida simpática al retirar la mano (solo sonrisa "^_^" en brillo 8, sin guiño)
   setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
-  if (lastGoodbyeGesture == 0) {
-    showRows(ICON_WINK);
-    lastGoodbyeGesture = 1;
-  } else {
-    showRows(ICON_HAPPY);
-    lastGoodbyeGesture = 0;
-  }
-  if (!waitInteractiveMs(650)) return;
+  showRows(ICON_HAPPY);
+  if (!waitInteractiveMs(550)) return;
 
   if (notifCount == 0) {
     resumeLivingFaceSmooth();
@@ -1206,17 +1311,305 @@ void buildNotifText(const NotifItem& item, uint8_t idx, uint8_t total, char* out
         snprintf(outBuf, outSize, "%sYa inici\x83: %s", prefix, item.sender);
       }
     }
+  } else if (item.count > 1) {
+    snprintf(outBuf, outSize, "%s%s (x%u)", prefix, item.sender, (unsigned)item.count);
   } else {
     snprintf(outBuf, outSize, "%s%s", prefix, item.sender);
   }
 }
 
 void stopMotors() {
+  analogWrite(MR_PWM_ALT, 0);
+  analogWrite(ML_PWM, 0);
+  analogWrite(MR_PWM, 0);
   digitalWrite(MR_CTRL, LOW);
   digitalWrite(ML_CTRL, LOW);
   digitalWrite(MR_PWM_ALT, LOW);
   digitalWrite(ML_PWM, LOW);
   digitalWrite(MR_PWM, LOW);
+}
+
+// --- Ejecución de Controles Directos desde el Chat (/robot) ---
+void setMotorsRaw(bool leftForward, bool rightForward, uint8_t pwmVal) {
+  if (motorFlipForward) {
+    leftForward  = !leftForward;
+    rightForward = !rightForward;
+  }
+  // En Keyestudio Turtle V3.x: LOW = avance, HIGH = retroceso
+  digitalWrite(ML_CTRL, leftForward ? LOW : HIGH);
+  digitalWrite(MR_CTRL, rightForward ? LOW : HIGH);
+  analogWrite(ML_PWM, pwmVal);
+  analogWrite(MR_PWM_ALT, pwmVal);
+  analogWrite(MR_PWM, pwmVal);
+}
+
+void driveSafeWheelStep(const char* spec) {
+  char dir = 'S';
+  while (*spec == ' ' || *spec == ':') spec++;
+  if (*spec != '\0') {
+    dir = *spec;
+    if (dir >= 'a' && dir <= 'z') dir = dir - 'a' + 'A';
+  }
+
+  if (dir == 'I') {
+    motorFlipForward = !motorFlipForward;
+    stopMotors();
+    Serial.println(F("OK:W:FLIP"));
+    return;
+  }
+  if (dir == 'S') {
+    stopMotors();
+    Serial.println(F("OK:W:STOP"));
+    return;
+  }
+
+  uint16_t durMs = 220;
+  const char* colon = strchr(spec, ':');
+  if (colon != NULL) {
+    int parsed = atoi(colon + 1);
+    if (parsed >= 60 && parsed <= 900) {
+      durMs = (uint16_t)parsed;
+    } else if (parsed > 900) {
+      durMs = 900;
+    }
+  }
+
+  isSleeping = false;
+
+  // Seguro previo anti-borde y anti-choque
+  if (!rawSensorsOnDesk()) {
+    stopMotors();
+    setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
+    showRows(ICON_LIFT_Oo);
+    delay(550);
+    if (notifCount == 0) resumeLivingFaceSmooth();
+    Serial.println(F("OK:W:EDGE"));
+    return;
+  }
+  if (dir == 'F' && readDistanceFastCm() <= 11.0f) {
+    stopMotors();
+    setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
+    showRows(ICON_LIFT_Oo);
+    delay(550);
+    if (notifCount == 0) resumeLivingFaceSmooth();
+    Serial.println(F("OK:W:OBSTACLE"));
+    return;
+  }
+
+  bool lFwd = true;
+  bool rFwd = true;
+  uint8_t speedPwm = 165;
+  if (dir == 'B') {
+    lFwd = false;
+    rFwd = false;
+  } else if (dir == 'L') {
+    lFwd = false;
+    rFwd = true;
+    speedPwm = 175;
+  } else if (dir == 'R') {
+    lFwd = true;
+    rFwd = false;
+    speedPwm = 175;
+  } else if (dir != 'F') {
+    stopMotors();
+    Serial.println(F("OK:W:INVALID"));
+    return;
+  }
+
+  setMotorsRaw(lFwd, rFwd, speedPwm);
+  unsigned long t0 = millis();
+  while (millis() - t0 < durMs) {
+    if (!rawSensorsOnDesk()) {
+      stopMotors();
+      setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
+      showRows(ICON_LIFT_Oo);
+      delay(600);
+      if (notifCount == 0) resumeLivingFaceSmooth();
+      Serial.println(F("OK:W:EDGE"));
+      return;
+    }
+    if (dir == 'F' && ((millis() - t0) % 40UL < 12UL) && readDistanceFastCm() <= 10.5f) {
+      stopMotors();
+      setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
+      showRows(ICON_LIFT_Oo);
+      delay(550);
+      if (notifCount == 0) resumeLivingFaceSmooth();
+      Serial.println(F("OK:W:OBSTACLE"));
+      return;
+    }
+    delay(8);
+  }
+  stopMotors();
+  if (notifCount == 0) {
+    updateLivingFace();
+  }
+  Serial.println(F("OK:W:DONE"));
+}
+
+bool waitRemoteGestureMs(unsigned long ms) {
+  unsigned long t0 = millis();
+  while (millis() - t0 < ms) {
+    pollBluetooth();
+    if (isRobotLifted()) {
+      handleLiftedReaction();
+      return false;
+    }
+    if (pendingRemoteKind != RCMD_NONE) {
+      return false;
+    }
+    delay(20);
+  }
+  return true;
+}
+
+void executeNeckRemoteCmd(const char* arg) {
+  isSleeping = false;
+  char c0 = arg[0];
+  if (c0 >= 'a' && c0 <= 'z') c0 = c0 - 'a' + 'A';
+
+  if (c0 == 'L') {
+    panSmoothTo(PULSE_MIN_US, false, (notifCount == 0));
+    Serial.println(F("OK:N:L"));
+  } else if (c0 == 'R') {
+    panSmoothTo(PULSE_MAX_US, false, (notifCount == 0));
+    Serial.println(F("OK:N:R"));
+  } else if (c0 == 'C') {
+    panSmoothTo(PULSE_CENTER_US, false, (notifCount == 0));
+    Serial.println(F("OK:N:C"));
+  } else if (c0 == 'N') {
+    // Negar con la cabeza ("NO")
+    int prev = currentPulseUs;
+    panSmoothTo(PULSE_CENTER_US - 220, false, (notifCount == 0));
+    panSmoothTo(PULSE_CENTER_US + 220, false, (notifCount == 0));
+    panSmoothTo(PULSE_CENTER_US - 180, false, (notifCount == 0));
+    panSmoothTo(prev, false, (notifCount == 0));
+    Serial.println(F("OK:N:NO"));
+  } else if (c0 == 'S') {
+    // Escaneo curioso completo ("SCAN")
+    panSmoothTo(PULSE_MIN_US, false, (notifCount == 0));
+    waitRemoteGestureMs(220);
+    panSmoothTo(PULSE_MAX_US, false, (notifCount == 0));
+    waitRemoteGestureMs(220);
+    panSmoothTo(PULSE_CENTER_US, false, (notifCount == 0));
+    Serial.println(F("OK:N:SCAN"));
+  } else {
+    int deg = atoi(arg);
+    if (deg < 40)  deg = 40;
+    if (deg > 140) deg = 140;
+    int targetUs = (int)map(deg, 40, 140, TRACK_PULSE_MIN_US, TRACK_PULSE_MAX_US);
+    panSmoothTo(targetUs, false, (notifCount == 0));
+    Serial.println(F("OK:N:ANG"));
+  }
+
+  pauseStartMs       = millis();
+  nextObservePauseMs = pickRandomObservePauseMs();
+}
+
+void executeGestureRemoteCmd(const char* arg) {
+  char c0 = arg[0];
+  char c1 = (arg[0] != '\0') ? arg[1] : '\0';
+  if (c0 >= 'a' && c0 <= 'z') c0 = c0 - 'a' + 'A';
+  if (c1 >= 'a' && c1 <= 'z') c1 = c1 - 'a' + 'A';
+
+  setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
+
+  if (c0 == 'S' && c1 == 'L') {
+    // SLEEP (Modo Dormir)
+    isSleeping = true;
+    showRowsP(ICON_SLEEP_0);
+    Serial.println(F("OK:G:SLEEP"));
+    return;
+  }
+  if (c0 == 'W') {
+    // WAKE (Despertar)
+    isSleeping = false;
+    resumeLivingFaceSmooth();
+    pauseStartMs       = millis();
+    nextObservePauseMs = pickRandomObservePauseMs();
+    Serial.println(F("OK:G:WAKE"));
+    return;
+  }
+
+  isSleeping = false;
+
+  if (c0 == 'H' && c1 == 'E') {
+    // HEART (Corazón latiendo)
+    for (uint8_t i = 0; i < 3; i++) {
+      showRowsP(ICON_HEART_BIG);
+      if (!waitRemoteGestureMs(360)) return;
+      showRowsP(ICON_HEART_SMALL);
+      if (!waitRemoteGestureMs(240)) return;
+    }
+    showRowsP(ICON_HEART_BIG);
+    if (!waitRemoteGestureMs(400)) return;
+    Serial.println(F("OK:G:HEART"));
+  } else if (c0 == 'S') {
+    // SURPRISE (O_o <-> o_O)
+    for (uint8_t i = 0; i < 4; i++) {
+      showRows((i % 2 == 0) ? ICON_LIFT_Oo : ICON_LIFT_oO);
+      if (!waitRemoteGestureMs(420)) return;
+    }
+    Serial.println(F("OK:G:SURPRISE"));
+  } else if (c0 == 'T') {
+    // THINK (Pensando...)
+    for (uint8_t i = 0; i < 2; i++) {
+      showRowsP(ICON_THINK_0);
+      if (!waitRemoteGestureMs(320)) return;
+      showRowsP(ICON_THINK_1);
+      if (!waitRemoteGestureMs(320)) return;
+      showRowsP(ICON_THINK_2);
+      if (!waitRemoteGestureMs(420)) return;
+    }
+    Serial.println(F("OK:G:THINK"));
+  } else if (c0 == 'C') {
+    // CELEBRATE (^_^ + baile alegre de cuello)
+    showRows(ICON_HAPPY);
+    panSmoothTo(PULSE_CENTER_US - 240, false, false);
+    panSmoothTo(PULSE_CENTER_US + 240, false, false);
+    panSmoothTo(PULSE_CENTER_US, false, false);
+    if (!waitRemoteGestureMs(500)) return;
+    Serial.println(F("OK:G:CELEBRATE"));
+  } else {
+    // HAPPY (^_^)
+    showRows(ICON_HAPPY);
+    if (!waitRemoteGestureMs(1800)) return;
+    Serial.println(F("OK:G:HAPPY"));
+  }
+
+  if (notifCount == 0) {
+    resumeLivingFaceSmooth();
+  }
+  pauseStartMs       = millis();
+  nextObservePauseMs = pickRandomObservePauseMs();
+}
+
+void executePendingRemoteCommand() {
+  RemoteCmdKind kind = pendingRemoteKind;
+  if (kind == RCMD_NONE) return;
+
+  char argCopy[36];
+  strncpy(argCopy, pendingRemotePayload, sizeof(argCopy) - 1);
+  argCopy[sizeof(argCopy) - 1] = '\0';
+  pendingRemoteKind = RCMD_NONE;
+
+  stopMotors();
+
+  if (kind == RCMD_WHEEL) {
+    driveSafeWheelStep(argCopy);
+  } else if (kind == RCMD_NECK) {
+    executeNeckRemoteCmd(argCopy);
+  } else if (kind == RCMD_GESTURE) {
+    executeGestureRemoteCmd(argCopy);
+  } else if (kind == RCMD_TEXT) {
+    isSleeping = false;
+    if (argCopy[0] != '\0') {
+      scrollText(argCopy, false, false);
+    }
+    if (notifCount == 0 && pendingRemoteKind == RCMD_NONE) {
+      resumeLivingFaceSmooth();
+    }
+    Serial.println(F("OK:T"));
+  }
 }
 
 void setup() {
@@ -1270,10 +1663,17 @@ void loop() {
     return;
   }
 
+  // Si llega un comando directo desde /robot en Antigravity, ejecutarlo de inmediato
+  if (pendingRemoteKind != RCMD_NONE) {
+    executePendingRemoteCommand();
+    return;
+  }
+
   if (triggerRemoteBuenDia && notifCount == 0) {
     triggerRemoteBuenDia = false;
+    isSleeping = false;
     scrollText(MSG_BUEN_DIA, false, true);
-    if (notifCount == 0) {
+    if (notifCount == 0 && pendingRemoteKind == RCMD_NONE) {
       resumeLivingFaceSmooth(0);
     }
     pauseStartMs       = millis();
@@ -1354,6 +1754,29 @@ void loop() {
     } else {
       resumeLivingFaceSmooth(0);
     }
+    return;
+  }
+
+  // ==========================================================================
+  // MODO DORMIR (/robot dormir -> ojos cerrados apacibles y cuello quieto)
+  // ==========================================================================
+  if (isSleeping) {
+    setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
+    if (((millis() / 1300UL) % 2UL) == 0UL) {
+      showRowsP(ICON_SLEEP_0);
+    } else {
+      showRowsP(ICON_SLEEP_1);
+    }
+    if (millis() - lastIdleSonarMs >= 120UL) {
+      lastIdleSonarMs = millis();
+      if (isSomeoneNear()) {
+        isSleeping = false;
+        resumeLivingFaceSmooth();
+        pauseStartMs       = millis();
+        nextObservePauseMs = pickRandomObservePauseMs();
+      }
+    }
+    delay(40);
     return;
   }
 

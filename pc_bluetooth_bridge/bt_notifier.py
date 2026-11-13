@@ -16,9 +16,9 @@ Modos de ejecución:
       python.exe bt_notifier.py
       Comandos de prueba:
         m:Juan Perez         -> Correo nuevo
-        c:Sylvia Constanzo   -> Mensaje de Chat
+        c:Ana Gomez          -> Mensaje de Chat
         r:10:Planificacion   -> Reunión que inicia en 10 min
-        r:0:Daily TyA        -> Reunión que inicia ahora mismo
+        r:0:Daily Equipo     -> Reunión que inicia ahora mismo
         r:-4:Coordinacion    -> Reunión que ya inició hace 4 min
         b                    -> Saludo "Buen día!"
         x                    -> Limpiar toda la cola
@@ -32,7 +32,9 @@ import html
 import json
 import os
 import re
+import subprocess
 import sys
+import time
 import unicodedata
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
@@ -47,9 +49,14 @@ MAX_SENDER_CHARS = 21
 RECENT_CATCHUP_SECONDS = 900  # Recuperar avisos de hasta 15 min atrás al reconectar
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_PATH = os.path.abspath(__file__)
+BOOT_MTIME = os.path.getmtime(SCRIPT_PATH) if os.path.exists(SCRIPT_PATH) else 0.0
 LOG_FILE = os.path.join(BASE_DIR, "bt_notifier.log")
 STATE_FILE = os.path.join(BASE_DIR, "sent_state.json")
 CALENDAR_CONFIG_FILE = os.path.join(BASE_DIR, "calendar_config.json")
+CMD_INBOX_FILE = os.path.join(BASE_DIR, "cmd_inbox.jsonl")
+CMD_REPLY_FILE = os.path.join(BASE_DIR, "cmd_reply.json")
+HEARTBEAT_FILE = os.path.join(BASE_DIR, "bridge_heartbeat.json")
 
 WPN_WAL_PATH = os.path.expandvars(
     r"%LOCALAPPDATA%\Microsoft\Windows\Notifications\wpndatabase.db-wal"
@@ -124,6 +131,91 @@ def acquire_single_instance_mutex() -> bool:
     return True
 
 
+def release_single_instance_mutex() -> None:
+    global _MUTEX_HANDLE
+    if _MUTEX_HANDLE:
+        try:
+            ctypes.windll.kernel32.CloseHandle(_MUTEX_HANDLE)
+        except Exception:
+            pass
+        _MUTEX_HANDLE = None
+
+
+def write_heartbeat(connected: bool) -> None:
+    tmp_path = HEARTBEAT_FILE + ".tmp"
+    data = {"ts": time.time(), "connected": connected, "pid": os.getpid()}
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp_path, HEARTBEAT_FILE)
+    except Exception:
+        pass
+
+
+def write_cmd_reply(req_id: str, cmd_str: str, ok: bool, reply: str) -> None:
+    tmp_path = CMD_REPLY_FILE + ".tmp"
+    data = {
+        "id": req_id,
+        "cmd": cmd_str,
+        "ok": ok,
+        "reply": reply,
+        "ts": time.time(),
+    }
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp_path, CMD_REPLY_FILE)
+    except Exception:
+        pass
+
+
+def pop_inbox_commands() -> list[tuple[str, str]]:
+    if not os.path.exists(CMD_INBOX_FILE):
+        return []
+    try:
+        if os.path.getsize(CMD_INBOX_FILE) == 0:
+            return []
+    except OSError:
+        return []
+
+    proc_path = CMD_INBOX_FILE + ".processing"
+    raw_lines: list[str] = []
+    try:
+        os.replace(CMD_INBOX_FILE, proc_path)
+        with open(proc_path, "r", encoding="utf-8", errors="ignore") as f:
+            raw_lines = f.read().splitlines()
+        try:
+            os.remove(proc_path)
+        except OSError:
+            pass
+    except OSError:
+        try:
+            with open(CMD_INBOX_FILE, "r+", encoding="utf-8", errors="ignore") as f:
+                raw_lines = f.read().splitlines()
+                f.seek(0)
+                f.truncate(0)
+        except OSError:
+            return []
+
+    items: list[tuple[str, str]] = []
+    for line in raw_lines:
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("{"):
+            try:
+                obj = json.loads(s)
+                cmd = str(obj.get("cmd", "")).strip()
+                req_id = str(obj.get("id", "")).strip() or f"cmd-{int(time.time()*1000)}"
+                if cmd:
+                    items.append((req_id, cmd))
+            except Exception:
+                continue
+        else:
+            items.append((f"raw-{int(time.time()*1000)}", s))
+    return items
+
+
 def log(msg: str) -> None:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{now}] {msg}"
@@ -171,6 +263,13 @@ def encode_robot_bytes(
     elif label is not None:
         out.append(ord(":"))
         out.extend(_encode_robot_str(label))
+    out.append(ord("\n"))
+    return bytes(out)
+
+
+def encode_raw_command(cmd_str: str) -> bytes:
+    clean = cmd_str.replace("\r", "").replace("\n", "").strip()
+    out = _encode_robot_str(clean)
     out.append(ord("\n"))
     return bytes(out)
 
@@ -673,7 +772,7 @@ async def console_input_loop(queue: asyncio.Queue) -> None:
         if not raw:
             continue
         cmd = raw[0].lower()
-        if cmd in ("m", "c", "r", "k", "b", "x", "q"):
+        if cmd in ("m", "c", "r", "k", "b", "x", "q", "w", "n", "g", "t", "s"):
             await queue.put(raw)
 
 
@@ -687,7 +786,8 @@ async def main() -> None:
 
     if not auto_mode:
         log(
-            "Modo interactivo: [m:Nombre]=Mail  [c:Nombre]=Chat  [r:10:Titulo]=Reunión  [b]=Buen día  [x]=Limpiar  [q]=Salir"
+            "Modo interactivo: [m:Nombre]=Mail  [c:Nombre]=Chat  [r:10:Titulo]=Reunión  "
+            "[w/n/g/t]=Control  [s]=Estado  [b]=Buen día  [x]=Limpiar  [q]=Salir"
         )
 
     cmd_queue: asyncio.Queue[str] = asyncio.Queue()
@@ -697,109 +797,192 @@ async def main() -> None:
     store = StateStore()
     watcher = WalToastWatcher(store)
     ics_poller = IcsCalendarPoller(store)
+    reload_requested = False
 
-    while True:
-        log(f"Buscando robot DX-BT24 ({BT24_MAC_ADDRESS})...")
-        dev = await find_bt24_device()
+    try:
+        while True:
+            write_heartbeat(False)
+            log(f"Buscando robot DX-BT24 ({BT24_MAC_ADDRESS})...")
+            dev = await find_bt24_device()
 
-        if not dev:
-            if auto_mode:
-                log(
-                    "Robot no detectado (apagado o fuera de alcance). Cerrando proceso; próximo intento en 10 min."
-                )
-                return
-            log("No veo el DX-BT24 todavía. Reintentando en 5s...")
-            await asyncio.sleep(5.0)
-            continue
-
-        log(f"Conectando a {dev.name or 'DX-BT24'} [{dev.address}]...")
-        try:
-            async with BleakClient(dev) as client:
-                log("¡CONECTADO por Bluetooth al Turtle Robot! Escuchando Mail, Chat y Reuniones...")
-
-                target_char = BT24_CHAR_UUID
-                for svc in client.services:
-                    for ch in svc.characteristics:
-                        if ch.uuid.lower() == BT24_CHAR_UUID:
-                            target_char = ch.uuid
-                            break
-
-                def _on_robot_ack(_, data: bytearray) -> None:
-                    txt = data.decode("ascii", errors="ignore").strip()
-                    if txt:
-                        log(f"[ACK Robot] {txt}")
-
-                try:
-                    await client.start_notify(target_char, _on_robot_ack)
-                except Exception:
-                    pass
-
-                first_cycle = True
-                while client.is_connected:
-                    while not cmd_queue.empty():
-                        raw_manual = await cmd_queue.get()
-                        c0 = raw_manual[0].lower()
-                        if c0 == "q":
-                            log("Cerrando puente Bluetooth.")
-                            return
-                        if c0 in ("r", "k"):
-                            # Acepta "r:10:Planificacion" o "r"
-                            parts = raw_manual.split(":", 2)
-                            mins_val = int(parts[1]) if len(parts) >= 2 and parts[1].lstrip("-").isdigit() else 5
-                            m_title = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else "Demo Reunion"
-                            payload = encode_robot_bytes("R", m_title[:MAX_SENDER_CHARS], mins_val)
-                        elif c0 in ("m", "c"):
-                            custom_sender = (
-                                raw_manual[2:].strip()
-                                if len(raw_manual) > 2 and raw_manual[1] == ":"
-                                else ("Prueba Mail" if c0 == "m" else "Prueba Chat")
-                            )
-                            payload = encode_robot_bytes(c0.upper(), custom_sender[:MAX_SENDER_CHARS])
-                        else:
-                            payload = encode_robot_bytes(c0.upper())
-                        await send_ble_payload(client, target_char, payload)
-                        log(f"Comando manual enviado: {raw_manual!r}")
-
-                    pending = watcher.poll_new_events(force_scan=first_cycle)
-                    pending.extend(ics_poller.poll_due_meetings())
-
-                    for kind, label, offset_min in pending:
-                        if kind == "R":
-                            estado = (
-                                f"en {offset_min}m"
-                                if (offset_min or 0) > 0
-                                else ("inicia ya" if (offset_min or 0) == 0 else f"ya inició ({-(offset_min or 0)}m)")
-                            )
-                            log(f"¡Aviso de REUNIÓN '{label}' ({estado})! Enviando al robot...")
-                            payload = encode_robot_bytes("R", label, offset_min)
-                        else:
-                            tipo = "GOOGLE CHAT" if kind == "C" else "EMAIL (Gmail)"
-                            log(f"¡Notificación de {tipo} de '{label}'! Enviando al robot...")
-                            payload = encode_robot_bytes(kind, label)
-                        await send_ble_payload(client, target_char, payload)
-                        await asyncio.sleep(0.15)
-
-                    first_cycle = False
-                    await asyncio.sleep(0.5)
-
-                log("El robot se desconectó.")
+            if not dev:
                 if auto_mode:
-                    await asyncio.sleep(3.0)
-                    retry_dev = await BleakScanner.find_device_by_address(
-                        BT24_MAC_ADDRESS, timeout=3.0
+                    log(
+                        "Robot no detectado (apagado o fuera de alcance). Cerrando proceso; próximo intento en 10 min."
                     )
-                    if not retry_dev:
-                        log(
-                            "Robot apagado confirmado. Cerrando proceso hasta el próximo chequeo en 10 min."
-                        )
-                        return
+                    return
+                log("No veo el DX-BT24 todavía. Reintentando en 5s...")
+                await asyncio.sleep(5.0)
+                continue
 
+            log(f"Conectando a {dev.name or 'DX-BT24'} [{dev.address}]...")
+            try:
+                async with BleakClient(dev) as client:
+                    log("¡CONECTADO por Bluetooth al Turtle Robot! Escuchando Mail, Chat, Reuniones y /robot...")
+                    write_heartbeat(True)
+                    last_hb_ts = time.time()
+                    last_notif_poll_ts = 0.0
+
+                    target_char = BT24_CHAR_UUID
+                    for svc in client.services:
+                        for ch in svc.characteristics:
+                            if ch.uuid.lower() == BT24_CHAR_UUID:
+                                target_char = ch.uuid
+                                break
+
+                    ack_queue: asyncio.Queue[str] = asyncio.Queue()
+                    rx_buf = [""]
+
+                    def _on_robot_ack(_, data: bytearray) -> None:
+                        chunk = data.decode("ascii", errors="ignore")
+                        if not chunk:
+                            return
+                        rx_buf[0] += chunk
+                        while "\n" in rx_buf[0]:
+                            line_str, rx_buf[0] = rx_buf[0].split("\n", 1)
+                            clean_line = line_str.strip()
+                            if clean_line:
+                                log(f"[ACK Robot] {clean_line}")
+                                try:
+                                    ack_queue.put_nowait(clean_line)
+                                except Exception:
+                                    pass
+
+                    try:
+                        await client.start_notify(target_char, _on_robot_ack)
+                    except Exception:
+                        pass
+
+                    first_cycle = True
+                    while client.is_connected:
+                        now_ts = time.time()
+                        if now_ts - last_hb_ts >= 2.0:
+                            write_heartbeat(True)
+                            last_hb_ts = now_ts
+                            try:
+                                if os.path.exists(SCRIPT_PATH) and abs(os.path.getmtime(SCRIPT_PATH) - BOOT_MTIME) > 0.5:
+                                    log("Actualización de bt_notifier.py detectada; recargando puente Bluetooth...")
+                                    reload_requested = True
+                                    break
+                            except OSError:
+                                pass
+
+                        # 1. Comandos remotos desde Antigravity (/robot -> cmd_inbox.jsonl)
+                        inbox_items = pop_inbox_commands()
+                        for req_id, raw_cmd in inbox_items:
+                            while not ack_queue.empty():
+                                try:
+                                    ack_queue.get_nowait()
+                                except Exception:
+                                    break
+                            payload = encode_raw_command(raw_cmd)
+                            log(f"[Chat /robot] -> {raw_cmd}")
+                            await send_ble_payload(client, target_char, payload)
+                            reply_line = "SENT"
+                            try:
+                                reply_line = await asyncio.wait_for(ack_queue.get(), timeout=3.5)
+                            except asyncio.TimeoutError:
+                                pass
+                            write_cmd_reply(req_id, raw_cmd, True, reply_line)
+
+                        # 2. Comandos manuales en consola interactiva
+                        while not cmd_queue.empty():
+                            raw_manual = await cmd_queue.get()
+                            c0 = raw_manual[0].lower()
+                            if c0 == "q" and len(raw_manual) == 1:
+                                log("Cerrando puente Bluetooth.")
+                                return
+                            if c0 == "s" and len(raw_manual) == 1:
+                                payload = encode_raw_command("Q")
+                            elif c0 in ("w", "n", "g", "t"):
+                                prefix_up = raw_manual[0].upper() + raw_manual[1:]
+                                payload = encode_raw_command(prefix_up)
+                            elif c0 in ("r", "k"):
+                                parts = raw_manual.split(":", 2)
+                                mins_val = int(parts[1]) if len(parts) >= 2 and parts[1].lstrip("-").isdigit() else 5
+                                m_title = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else "Demo Reunion"
+                                payload = encode_robot_bytes("R", m_title[:MAX_SENDER_CHARS], mins_val)
+                            elif c0 in ("m", "c"):
+                                custom_sender = (
+                                    raw_manual[2:].strip()
+                                    if len(raw_manual) > 2 and raw_manual[1] == ":"
+                                    else ("Prueba Mail" if c0 == "m" else "Prueba Chat")
+                                )
+                                payload = encode_robot_bytes(c0.upper(), custom_sender[:MAX_SENDER_CHARS])
+                            else:
+                                payload = encode_robot_bytes(c0.upper())
+                            await send_ble_payload(client, target_char, payload)
+                            log(f"Comando manual enviado: {raw_manual!r}")
+
+                        # 3. Escaneo de notificaciones Windows + Calendario ICS cada ~0.6s
+                        if first_cycle or (now_ts - last_notif_poll_ts >= 0.6):
+                            last_notif_poll_ts = now_ts
+                            pending = watcher.poll_new_events(force_scan=first_cycle)
+                            pending.extend(ics_poller.poll_due_meetings())
+
+                            for kind, label, offset_min in pending:
+                                if kind == "R":
+                                    estado = (
+                                        f"en {offset_min}m"
+                                        if (offset_min or 0) > 0
+                                        else ("inicia ya" if (offset_min or 0) == 0 else f"ya inició ({-(offset_min or 0)}m)")
+                                    )
+                                    log(f"¡Aviso de REUNIÓN '{label}' ({estado})! Enviando al robot...")
+                                    payload = encode_robot_bytes("R", label, offset_min)
+                                else:
+                                    tipo = "GOOGLE CHAT" if kind == "C" else "EMAIL (Gmail)"
+                                    log(f"¡Notificación de {tipo} de '{label}'! Enviando al robot...")
+                                    payload = encode_robot_bytes(kind, label)
+                                await send_ble_payload(client, target_char, payload)
+                                await asyncio.sleep(0.15)
+
+                            first_cycle = False
+
+                        await asyncio.sleep(0.12)
+
+                    write_heartbeat(False)
+                    if reload_requested:
+                        break
+
+                    log("El robot se desconectó.")
+                    if auto_mode:
+                        reconnected_nearby = False
+                        for _ in range(18):  # Reintentar durante ~90s (ideal al flashear por USB)
+                            await asyncio.sleep(4.0)
+                            retry_dev = await BleakScanner.find_device_by_address(
+                                BT24_MAC_ADDRESS, timeout=3.0
+                            )
+                            if retry_dev:
+                                reconnected_nearby = True
+                                break
+                        if not reconnected_nearby:
+                            log(
+                                "Robot apagado confirmado tras 90s. Cerrando proceso hasta el próximo chequeo en 10 min."
+                            )
+                            return
+
+            except Exception as exc:
+                write_heartbeat(False)
+                log(f"Conexión Bluetooth finalizada ({exc}).")
+                if auto_mode:
+                    log("Cerrando proceso automático hasta el próximo chequeo en 10 min.")
+                    return
+                await asyncio.sleep(4.0)
+    finally:
+        write_heartbeat(False)
+        release_single_instance_mutex()
+
+    if reload_requested:
+        try:
+            creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if auto_mode else 0
+            subprocess.Popen(
+                [sys.executable, SCRIPT_PATH, *sys.argv[1:]],
+                cwd=BASE_DIR,
+                close_fds=True,
+                creationflags=creation_flags,
+            )
         except Exception as exc:
-            log(f"Conexión Bluetooth finalizada ({exc}).")
-            if auto_mode:
-                log("Cerrando proceso automático hasta el próximo chequeo en 10 min.")
-                return
-            await asyncio.sleep(4.0)
+            log(f"No se pudo relanzar automáticamente tras actualizar ({exc}).")
 
 
 if __name__ == "__main__":

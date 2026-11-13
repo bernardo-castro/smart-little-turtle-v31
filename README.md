@@ -10,25 +10,33 @@ Firmware en **Arduino** y puente de notificaciones en **Python (Windows 11)** pa
 - **Ruedas bloqueadas por software (`LOW`)** para uso seguro sobre el escritorio sin desplazarse.
 - **Cara sincronizada en tiempo real con el ángulo físico del cuello (brillo `8`):** divide el recorrido del servo ultrasónico en **7 zonas angulares continuas (`-3` a `+3`)**. A medida que el cabezal gira de un lado a otro, la cara en la matriz `8x8` se desplaza paso a paso acompañándolo (cruzando por el centro exacto `0` cuando el ultrasonido pasa por `90°`), y donde el cuello se detenga —izquierda, centro o derecha— **la cara se queda mirando exactamente hacia ese mismo ángulo** mientras pestañea suavemente en 4 niveles (`2.6` a `5.6 s`).
 - **Paneo aleatorio con aceleración y frenado suave (`5` a `30 s`):** el servo del cuello (`D10`) arranca y frena progresivamente (*ease-in / ease-out* a `50 Hz`) y corta la señal al terminar para eliminar cualquier zumbido mecánico.
-- **Seguimiento vivo de tu mano:** cuando acercas la mano (`<= 12 cm`), engancha tu palma (`hasta ~26 cm`) y **gira el cuello siguiéndola en tiempo real** mientras su cara refleja en vivo cada ángulo del recorrido; al retirarla se despide con un guiño `O_-` o sonrisa `^_^` y reabre suavemente sus ojos en esa posición.
+- **Seguimiento vivo de tu mano:** cuando acercas la mano (`<= 12 cm`), engancha tu palma (`hasta ~26 cm`) y **gira el cuello siguiéndola en tiempo real** mientras su cara refleja en vivo cada ángulo del recorrido; al retirarla se despide con una sonrisa `^_^` y reabre suavemente sus ojos en esa posición.
 - **Reacción al levantarlo de la mesa (`O_o`):** aprovecha los 3 sensores infrarrojos inferiores (`D11, D7, D8`) para detectar al instante si alguien lo alza en el aire, alternando una cara desconcertada **`O_o` / `o_O`** mientras mira a ambos lados, y mostrando una sonrisa **`^_^`** de alivio cuando vuelve a apoyarse sobre el escritorio.
 
-### 2. Cola de Notificaciones Bluetooth BLE (`DX-BT24`) con Nombre del Remitente
+### 2. Cola de Notificaciones Bluetooth BLE (`DX-BT24`) con Agrupación por Remitente
 El puente en Windows monitorea en tiempo real las notificaciones emergentes (*toasts*) de Windows 11 (y opcionalmente tu calendario `.ics` en directo), extrae el remitente o la hora de inicio de la reunión y transmite el aviso por **BLE (`9600 bps`)** al robot:
 
 | Evento / Trama BLE | Acción del Robot | Pantalla `8x8` |
 | :--- | :--- | :--- |
-| **`M:<Remitente>`** (Nuevo correo en Gmail / Outlook) | Encola el correo, gira al frente (`90°`), muestra el sobre respirando (`~3.2 s`) y desplaza el **nombre del remitente**. | `✉` → `Nombre` |
-| **`C:<Remitente>`** (Mensaje en Google Chat / Hangouts o Chat integrado en Gmail) | Encola el chat, gira al frente (`90°`), muestra el globo animado (`~3.2 s`) y desplaza el **nombre de quien escribió**. | `💬` → `Nombre` |
-| **`R:<Min>:<Reunión>`** (Reuniones de Google Calendar, Outlook, Teams, Zoom o `.ics`) | Encola o actualiza la reunión, hace un pequeño giro de atención, muestra un **reloj animado (`⏰`)** y descuenta los minutos en vivo:<br>• Si falta tiempo (`Min > 0`): **`En 10m: <Reunión>`** (baja minuto a minuto solo)<br>• En el minuto exacto (`Min == 0`): **`Inicia ya: <Reunión>`**<br>• Si ya empezó (`Min < 0`): **`Ya inició (3m): <Reunión>`** (y el reloj gira más rápido) | `⏰` → `En Xm` / `Ya inició` |
+| **`M:<Remitente>`** (Nuevo correo en Gmail / Outlook) | Encola o agrupa el correo, gira al frente (`90°`), muestra el sobre respirando (`~3.2 s`, brillo `15`) y desplaza el **nombre del remitente** (`Nombre (xN)` si envió varios). | `✉` → `Nombre` |
+| **`C:<Remitente>`** (Mensaje en Google Chat / Hangouts o Chat integrado en Gmail) | Encola o agrupa el chat, gira al frente (`90°`), muestra el globo animado (`~3.2 s`, brillo `15`) y desplaza el **nombre de quien escribió** (`Nombre (xN)` si envió varios). | `💬` → `Nombre` |
+| **`R:<Min>:<Reunión>`** (Reuniones de Google Calendar, Outlook, Teams, Zoom o `.ics`) | Encola o actualiza la reunión, hace un pequeño giro de atención, muestra un **reloj animado (`⏰`, brillo `15`)** y descuenta los minutos en vivo:<br>• Si falta tiempo (`Min > 0`): **`En 10m: <Reunión>`** (baja minuto a minuto solo)<br>• En el minuto exacto (`Min == 0`): **`Inicia ya: <Reunión>`**<br>• Si ya empezó (`Min < 0`): **`Ya inició (3m): <Reunión>`** (y el reloj gira más rápido) | `⏰` → `En Xm` / `Ya inició` |
 | **`B`** (Saludo remoto manual) | Desplaza el mensaje `"Buen día!"` en pantalla. | Texto `Buen día!` |
-| **`X`** (Limpiar cola) | Vacía inmediatamente todas las notificaciones pendientes y regresa al reposo. | Pantalla apagada |
+| **`X`** (Limpiar cola) | Vacía inmediatamente todas las notificaciones pendientes y regresa a la cara viva. | Cara viva |
 
-**Cola inteligente y borrado de a uno con la mano (`<= 10 cm`):**
-- **Iteración continua:** si llegan varios mensajes seguidos (hasta `10` en cola), el robot los recorre uno tras otro mostrando su ícono correspondiente (`✉` o `💬`) seguido de su posición y remitente (por ejemplo, `1/3 Sylvia`, `2/3 Renato`, `3/3 Ana`).
-- **Borrado individual por proximidad:** cada vez que acercas la mano a `<= 10 cm` del sensor ultrasónico, el robot muestra un tilde **`✔`**, **borra únicamente el mensaje actual** y pasa al siguiente pendiente hasta vaciar la cola y apagar la pantalla.
+**Agrupación inteligente y limpieza completa por remitente con la mano (`<= 10 cm`):**
+- **Agrupación automática `(xN)`:** si una misma persona envía múltiples mensajes seguidos, se agrupan en un solo ítem mostrando la cantidad acumulada (por ejemplo, `Ana (x4)`), evitando saturar la cola.
+- **Iteración continua:** si hay avisos de distintas personas (hasta `10` grupos en cola), el robot los recorre mostrando su ícono (`✉`, `💬` o `⏰`) seguido de su posición y remitente (`1/3 Ana (x4)`, `2/3 Carlos`, etc.).
+- **Check por persona (`✔`):** al acercar la mano a `<= 10 cm` del sensor ultrasónico, el robot muestra un check **`✔`** y **limpia de una sola vez todas las notificaciones en cola pertenecientes a ese remitente** (incluyendo correos y chats bajo ese mismo nombre), pasando al siguiente remitente o regresando a su cara viva.
 
-### 3. Inicio Automático Inteligente en Windows (0 Consumo Inactivo)
+### 3. Control Conversacional en Vivo por Bluetooth (`robot_ctl.py` / `/robot`)
+Sin interrumpir las notificaciones en segundo plano, `robot_ctl.py` envía órdenes en vivo a través del puente BLE activo (`cmd_inbox.jsonl` → `DX-BT24` → `cmd_reply.json`) o por conexión BLE directa de respaldo:
+- **Micro-movimientos seguros sobre escritorio:** `W:F:<ms>`, `W:B:<ms>`, `W:L:<ms>`, `W:R:<ms>`, `W:S` (con freno automático ante bordes por sensores IR inferiores y ante obstáculos frontales `< 11 cm`).
+- **Cuello y mirada sincronizada:** `N:L`, `N:C`, `N:R`, `N:NO`, `N:SCAN` o ángulo exacto `N:<40..140>`.
+- **Gestos y estados (brillo `8`):** `G:HAPPY`, `G:SURPRISE`, `G:HEART`, `G:THINK`, `G:CELEBRATE`, `G:SLEEP` (`Zzz`) y `G:WAKE`.
+- **Texto personalizado y telemetría:** `T:<mensaje>` (con soporte de acentos y `ñ`) y `Q` (`STAT:DIST=...,DESK=...,PULSE=...,ZONE=...,NOTIF=...,SLEEP=...`).
+
+### 4. Inicio Automático Inteligente en Windows (0 Consumo Inactivo)
 - Se lanza de forma invisible (`pythonw.exe bt_notifier.py --auto`) **al iniciar sesión en Windows**.
 - Si el robot está **apagado o fuera de alcance**, el proceso **se cierra por completo** (`0 MB RAM / 0% CPU`).
 - Una **Tarea Programada de Windows** reintenta la búsqueda de forma silenciosa **cada 10 minutos**; si ya está conectado, un `Mutex` de Windows (`Local\TurtleRobotBT24Bridge`) evita instancias duplicadas.
@@ -58,7 +66,8 @@ El puente en Windows monitorea en tiempo real las notificaciones emergentes (*to
 ├── turtle_curious/
 │   └── turtle_curious.ino                 # Firmware principal para Arduino Uno (ATmega328P)
 ├── pc_bluetooth_bridge/
-│   ├── bt_notifier.py                     # Puente Windows 11 Notification WAL -> BLE DX-BT24
+│   ├── bt_notifier.py                     # Puente Windows 11 Notification WAL -> BLE DX-BT24 + cola /robot
+│   ├── robot_ctl.py                       # CLI para enviar comandos en vivo al robot (/robot)
 │   ├── requirements.txt                   # Dependencias de Python (bleak)
 │   ├── iniciar_notificaciones.bat         # Lanzador manual interactivo en consola
 │   ├── instalar_inicio_automatico.ps1     # Configura arranque con Windows + chequeo cada 10 min
@@ -117,7 +126,7 @@ Una vez finalizada la carga, apaga el robot, inserta nuevamente el módulo **DX-
 
 - **Modo consola interactivo:** ejecuta `pc_bluetooth_bridge\iniciar_notificaciones.bat` (debes no tener la instancia automática corriendo o detenerla antes). Permite enviar comandos en vivo presionando:
   - `[m:Juan Perez]` + Enter → Probar aviso de **Correo (`✉`)** con remitente
-  - `[c:Sylvia]` + Enter → Probar aviso de **Chat (`💬`)** con remitente
+  - `[c:Ana]` + Enter → Probar aviso de **Chat (`💬`)** con remitente
   - `[r:10:Planificacion]` + Enter → Probar **Reunión (`⏰`)** que inicia en 10 min
   - `[r:0:Daily]` + Enter → Probar **Reunión (`⏰`)** que inicia ahora mismo
   - `[r:-4:Coordinacion]` + Enter → Probar **Reunión (`⏰`)** que ya inició hace 4 min
