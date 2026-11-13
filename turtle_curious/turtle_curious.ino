@@ -53,7 +53,6 @@ const int PULSE_MAX_US       = 1910; // ~128° límite reposo
 const int TRACK_PULSE_MIN_US = 960;  // ~40° límite seguimiento de mano
 const int TRACK_PULSE_MAX_US = 2020; // ~140° límite seguimiento de mano
 const int PULSE_STEP_US      = 7;    // Velocidad suave en reposo
-const int TRACK_STEP_US      = 14;   // Velocidad ágil siguiendo tu mano
 const int MIN_DELTA_US       = 260;  // Mínimo ~24° por giro aleatorio
 
 // --- Tiempos ---
@@ -67,8 +66,8 @@ const unsigned int  SCROLL_STEP_MS = 56;      // Velocidad ágil de desplazamien
 const int   TRIG_PIN        = 12;
 const int   ECHO_PIN        = 13;
 const float NEAR_DETECT_CM  = 10.0f; // Distancia para borrar avisos (<= 10 cm)
-const float TRACK_START_CM  = 12.0f; // Distancia para enganchar tu mano en reposo
-const float TRACK_HOLD_CM   = 26.0f; // Rango de seguimiento activo una vez enganchada
+const float TRACK_START_CM  = 15.0f; // Distancia cómoda para enganchar tu mano en reposo
+const float TRACK_HOLD_CM   = 28.0f; // Rango de seguimiento activo una vez enganchada
 
 // --- Sensores Infrarrojos Inferiores (detector de levantamiento de la mesa) ---
 const int LINE_L_PIN = 11;
@@ -602,25 +601,25 @@ bool isHandReadyToTrack() {
   return (d2 <= TRACK_START_CM + 2.0f);
 }
 
-// Lectura rápida para bucle de seguimiento 50 Hz (timeout corto ~44 cm)
-float readTrackDistanceCm() {
+// Lectura rápida para bucle de seguimiento 50 Hz (timeout corto ~36 cm)
+float readTrackDistanceCm(bool retryOnMiss) {
   digitalWrite(TRIG_PIN, LOW);
   delayMicroseconds(2);
   digitalWrite(TRIG_PIN, HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
 
-  unsigned long duration = pulseIn(ECHO_PIN, HIGH, 2600UL);
-  if (duration == 0) {
-    // Segundo pulso rápido por si la mano estaba inclinada
-    delayMicroseconds(200);
+  unsigned long duration = pulseIn(ECHO_PIN, HIGH, 2100UL);
+  if (duration == 0 && retryOnMiss) {
+    // Segundo pulso rápido solo cuando ya estaba enganchado, por si la mano está inclinada
+    delayMicroseconds(180);
     digitalWrite(TRIG_PIN, HIGH);
     delayMicroseconds(10);
     digitalWrite(TRIG_PIN, LOW);
-    duration = pulseIn(ECHO_PIN, HIGH, 2600UL);
-    if (duration == 0) {
-      return 999.0f;
-    }
+    duration = pulseIn(ECHO_PIN, HIGH, 1750UL);
+  }
+  if (duration == 0) {
+    return 999.0f;
   }
   return (duration * 0.0343f) / 2.0f;
 }
@@ -1132,20 +1131,28 @@ bool waitInteractiveMs(unsigned long ms) {
   return true;
 }
 
-// --- Seguimiento activo de tu mano con el cuello + cara sincronizada al ángulo ---
+// --- Seguimiento fluido de tu mano con control de inercia, memoria direccional y auto-centrado ---
 enum TrackState : uint8_t {
-  TRK_LOCKED    = 0,
-  TRK_PROBE_1   = 1,
-  TRK_PROBE_2   = 2,
-  TRK_CENTERING = 3
+  TRK_LOCKED       = 0,
+  TRK_PROBE_NEAR   = 1,
+  TRK_PROBE_FAR    = 2,
+  TRK_PROBE_RETURN = 3,
+  TRK_SLIDE_CENTER = 4,
+  TRK_SETTLE       = 5
 };
 
 void trackHandWithEyes() {
-  TrackState state     = TRK_LOCKED;
-  int8_t trackDir      = 1;
-  uint8_t centerFrames = 0;
-  int curTrackStepUs   = 5;
-  int sweepStartUs     = currentPulseUs;
+  static int8_t lastGoodDir = 1;
+
+  TrackState state       = TRK_LOCKED;
+  int8_t trackDir        = lastGoodDir;
+  uint8_t missStreak     = 0;
+  int velX10             = 0;  // Velocidad actual en décimas de µs / frame (20 ms)
+  int pulseAccumX10      = 0;  // Acumulador sub-µs para movimientos muy lentos sin vibrar
+  int probeOriginUs      = currentPulseUs;
+  int entryEdgeUs        = currentPulseUs;
+  int centerTargetUs     = currentPulseUs;
+  const int maxAccelX10  = 14; // Rampa suave de aceleración/frenado (1.4 µs/frame²)
 
   while (true) {
     unsigned long frameStartUs = micros();
@@ -1161,80 +1168,106 @@ void trackHandWithEyes() {
       return;
     }
 
-    float dist      = readTrackDistanceCm();
-    bool handSeen   = (dist <= TRACK_HOLD_CM);
-    bool movedServo = false;
+    float dist    = readTrackDistanceCm(state == TRK_LOCKED || state == TRK_SLIDE_CENTER);
+    bool handSeen = (dist <= TRACK_HOLD_CM);
+    bool atSearchLimit = ((trackDir < 0 && currentPulseUs <= TRACK_PULSE_MIN_US) ||
+                          (trackDir > 0 && currentPulseUs >= TRACK_PULSE_MAX_US));
+    int desiredVelX10 = 0;
+
+    if (handSeen && (state == TRK_PROBE_NEAR || state == TRK_PROBE_FAR || state == TRK_PROBE_RETURN)) {
+      lastGoodDir = trackDir;
+      entryEdgeUs = currentPulseUs;
+      missStreak  = 0;
+      state       = TRK_SLIDE_CENTER;
+    }
 
     if (state == TRK_LOCKED) {
-      curTrackStepUs = 5;
-      if (!handSeen) {
-        state          = TRK_PROBE_1;
-        sweepStartUs   = currentPulseUs;
-        curTrackStepUs = 5;
-      }
-    }
-
-    if (state == TRK_PROBE_1) {
+      desiredVelX10 = 0;
       if (handSeen) {
-        state        = TRK_CENTERING;
-        centerFrames = 4;
+        missStreak = 0;
       } else {
-        if (curTrackStepUs < TRACK_STEP_US) {
-          curTrackStepUs += 2;
-          if (curTrackStepUs > TRACK_STEP_US) curTrackStepUs = TRACK_STEP_US;
-        }
-        int nextUs       = currentPulseUs + (int)trackDir * curTrackStepUs;
-        bool hitLimit    = (nextUs < TRACK_PULSE_MIN_US || nextUs > TRACK_PULSE_MAX_US);
-        bool sweptEnough = (abs(nextUs - sweepStartUs) >= 240);
-
-        if (hitLimit || sweptEnough) {
-          trackDir       = -trackDir;
-          curTrackStepUs = 5;
-          state          = TRK_PROBE_2;
-        } else {
-          currentPulseUs = nextUs;
-          movedServo     = true;
+        missStreak++;
+        if (missStreak >= 2) {
+          // Empieza explorando suavemente en la última dirección exitosa
+          trackDir      = lastGoodDir;
+          probeOriginUs = currentPulseUs;
+          state         = TRK_PROBE_NEAR;
         }
       }
-    } else if (state == TRK_PROBE_2) {
+    } else if (state == TRK_PROBE_NEAR) {
+      desiredVelX10 = (int)trackDir * 80; // ~8.0 µs/frame suave
+      if (atSearchLimit || abs(currentPulseUs - probeOriginUs) >= 150) {
+        trackDir = -trackDir;
+        state    = TRK_PROBE_FAR;
+      }
+    } else if (state == TRK_PROBE_FAR) {
+      desiredVelX10 = (int)trackDir * 95; // ~9.5 µs/frame fluido al cruzar el otro lado
+      if (atSearchLimit || abs(currentPulseUs - probeOriginUs) >= 300) {
+        trackDir = -trackDir;
+        state    = TRK_PROBE_RETURN;
+      }
+    } else if (state == TRK_PROBE_RETURN) {
+      desiredVelX10 = (int)trackDir * 75;
+      bool passedOrigin = ((trackDir > 0 && currentPulseUs >= probeOriginUs) ||
+                           (trackDir < 0 && currentPulseUs <= probeOriginUs));
+      if (passedOrigin || atSearchLimit) {
+        break;
+      }
+    } else if (state == TRK_SLIDE_CENTER) {
+      // Se desliza dentro del perfil de la mano para quedar centrado, sin pasarse de largo
       if (handSeen) {
-        state        = TRK_CENTERING;
-        centerFrames = 4;
+        missStreak = 0;
+        desiredVelX10 = (int)trackDir * 45; // Deslizamiento fino ~4.5 µs/frame
+        bool reachedCenter = (abs(currentPulseUs - entryEdgeUs) >= 65);
+        if (reachedCenter || atSearchLimit) {
+          desiredVelX10 = 0;
+          state = TRK_LOCKED;
+        }
       } else {
-        if (curTrackStepUs < TRACK_STEP_US) {
-          curTrackStepUs += 2;
-          if (curTrackStepUs > TRACK_STEP_US) curTrackStepUs = TRACK_STEP_US;
-        }
-        int nextUs          = currentPulseUs + (int)trackDir * curTrackStepUs;
-        bool hitLimit       = (nextUs < TRACK_PULSE_MIN_US || nextUs > TRACK_PULSE_MAX_US);
-        bool sweptOtherSide = (abs(nextUs - sweepStartUs) >= 340);
-
-        if (hitLimit || sweptOtherSide) {
-          break;
-        } else {
-          currentPulseUs = nextUs;
-          movedServo     = true;
-        }
+        // Borde angosto (p.ej. dedos): vuelve suavemente al punto medio detectado
+        centerTargetUs = (entryEdgeUs + currentPulseUs) / 2;
+        if (centerTargetUs < TRACK_PULSE_MIN_US) centerTargetUs = TRACK_PULSE_MIN_US;
+        if (centerTargetUs > TRACK_PULSE_MAX_US) centerTargetUs = TRACK_PULSE_MAX_US;
+        state = TRK_SETTLE;
       }
-    } else if (state == TRK_CENTERING) {
-      if (handSeen && centerFrames > 0) {
-        int stepC  = 7;
-        int nextUs = currentPulseUs + (int)trackDir * stepC;
-        if (nextUs >= TRACK_PULSE_MIN_US && nextUs <= TRACK_PULSE_MAX_US) {
-          currentPulseUs = nextUs;
-          movedServo     = true;
-        }
-        centerFrames--;
+    } else if (state == TRK_SETTLE) {
+      int diff = centerTargetUs - currentPulseUs;
+      if (handSeen || abs(diff) <= 10) {
+        desiredVelX10 = 0;
+        missStreak    = handSeen ? 0 : 1;
+        state         = TRK_LOCKED;
       } else {
-        state = TRK_LOCKED;
+        desiredVelX10 = constrain(diff * 2, -55, 55);
       }
     }
 
-    if (movedServo) {
-      pulseServoOnce(currentPulseUs);
-    } else {
-      digitalWrite(SERVO_PIN, LOW);
+    // Slew-rate limiter: acelera y frena con suavidad orgánica sin golpes bruscos
+    if (velX10 < desiredVelX10) {
+      velX10 += maxAccelX10;
+      if (velX10 > desiredVelX10) velX10 = desiredVelX10;
+    } else if (velX10 > desiredVelX10) {
+      velX10 -= maxAccelX10;
+      if (velX10 < desiredVelX10) velX10 = desiredVelX10;
     }
+
+    pulseAccumX10 += velX10;
+    int stepUs = pulseAccumX10 / 10;
+    pulseAccumX10 -= stepUs * 10;
+
+    if (stepUs != 0) {
+      int nextUs = currentPulseUs + stepUs;
+      if (nextUs < TRACK_PULSE_MIN_US) {
+        nextUs = TRACK_PULSE_MIN_US;
+        velX10 = 0;
+      } else if (nextUs > TRACK_PULSE_MAX_US) {
+        nextUs = TRACK_PULSE_MAX_US;
+        velX10 = 0;
+      }
+      currentPulseUs = nextUs;
+    }
+
+    // Mantener pulso continuo 50 Hz durante todo el seguimiento evita tirones al arrancar/frenar
+    pulseServoOnce(currentPulseUs);
 
     // La cara siempre refleja el ángulo físico exacto de currentPulseUs (-3..+3)
     updateLivingFace();
@@ -1254,7 +1287,7 @@ void trackHandWithEyes() {
   // Despedida simpática al retirar la mano (solo sonrisa "^_^" en brillo 8, sin guiño)
   setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
   showRows(ICON_HAPPY);
-  if (!waitInteractiveMs(550)) return;
+  if (!waitInteractiveMs(500)) return;
 
   if (notifCount == 0) {
     resumeLivingFaceSmooth();
