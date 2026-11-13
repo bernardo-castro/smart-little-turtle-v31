@@ -24,10 +24,10 @@ El puente en Windows monitorea en tiempo real las notificaciones emergentes (*to
 | **`B`** (Saludo remoto manual) | Desplaza el mensaje `"Buen día!"` en pantalla. | Texto `Buen día!` |
 | **`X`** (Limpiar cola) | Vacía inmediatamente todas las notificaciones pendientes y regresa a la cara viva. | Cara viva |
 
-**Agrupación inteligente y limpieza completa por remitente con la mano (`<= 10 cm`):**
+**Agrupación inteligente, pausa con carita viva y check por persona (`<= 10 cm`):**
+- **Avisos breves intercalados con la carita viva:** cada notificación se muestra brevemente (ícono `1.8 s` en brillo `15` + desplazamiento ágil en brillo `8`) y luego **regresa a su carita viva (`16 s`)** antes de volver a recordarte el aviso (o el siguiente de la cola), repitiendo el ciclo sin invadir la pantalla de forma continua. Si llega un mensaje nuevo mientras descansa, lo anuncia de inmediato.
 - **Agrupación automática `(xN)`:** si una misma persona envía múltiples mensajes seguidos, se agrupan en un solo ítem mostrando la cantidad acumulada (por ejemplo, `Ana (x4)`), evitando saturar la cola.
-- **Iteración continua:** si hay avisos de distintas personas (hasta `10` grupos en cola), el robot los recorre mostrando su ícono (`✉`, `💬` o `⏰`) seguido de su posición y remitente (`1/3 Ana (x4)`, `2/3 Carlos`, etc.).
-- **Check por persona (`✔`):** al acercar la mano a `<= 10 cm` del sensor ultrasónico, el robot muestra un check **`✔`** y **limpia de una sola vez todas las notificaciones en cola pertenecientes a ese remitente** (incluyendo correos y chats bajo ese mismo nombre), pasando al siguiente remitente o regresando a su cara viva.
+- **Check por persona (`✔`):** al acercar la mano a `<= 10 cm` del sensor ultrasónico (tanto durante el aviso como durante la pausa con carita viva), el robot muestra un check **`✔`** y **limpia de una sola vez todas las notificaciones en cola pertenecientes a ese remitente** (incluyendo correos y chats bajo ese mismo nombre), pasando al siguiente remitente o regresando a su estado normal.
 
 ### 3. Control Conversacional en Vivo por Bluetooth (`robot_ctl.py` / `/robot`)
 Sin interrumpir las notificaciones en segundo plano, `robot_ctl.py` envía órdenes en vivo a través del puente BLE activo (`cmd_inbox.jsonl` → `DX-BT24` → `cmd_reply.json`) o por conexión BLE directa de respaldo:

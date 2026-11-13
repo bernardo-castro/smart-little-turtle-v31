@@ -59,8 +59,9 @@ const int MIN_DELTA_US       = 260;  // Mínimo ~24° por giro aleatorio
 // --- Tiempos ---
 const unsigned long OBSERVE_MIN_MS = 5000UL;  // Pausa aleatoria mín: 5 s
 const unsigned long OBSERVE_MAX_MS = 30000UL; // Pausa aleatoria máx: 30 s
-const unsigned long ICON_HOLD_MS   = 3200UL;  // Segundos mostrando ícono antes del texto
-const unsigned int  SCROLL_STEP_MS = 70;      // Velocidad de desplazamiento de texto
+const unsigned long ICON_HOLD_MS   = 1800UL;  // Segundos mostrando ícono antes del texto
+const unsigned long NOTIF_REST_MS  = 16000UL; // Pausa mostrando carita viva entre recordatorios
+const unsigned int  SCROLL_STEP_MS = 56;      // Velocidad ágil de desplazamiento de texto
 
 // --- Sensor Ultrasónico ---
 const int   TRIG_PIN        = 12;
@@ -90,7 +91,8 @@ enum NotifType : uint8_t {
 
 enum NotifPhase : uint8_t {
   PHASE_ICON = 0,
-  PHASE_TEXT = 1
+  PHASE_TEXT = 1,
+  PHASE_REST = 2
 };
 
 const uint8_t MAX_NOTIFS     = 10;
@@ -702,6 +704,9 @@ void handleLiftedReaction() {
     resumeLivingFaceSmooth(0);
     pauseStartMs       = millis();
     nextObservePauseMs = pickRandomObservePauseMs();
+  } else if (notifPhase == PHASE_REST) {
+    resumeLivingFaceSmooth(0);
+    phaseStartMs = millis();
   } else {
     notifPhase      = PHASE_ICON;
     phaseStartMs    = millis();
@@ -728,9 +733,19 @@ bool sameSenderName(const char* a, const char* b) {
   return (*a == '\0' && *b == '\0');
 }
 
+void beginNotifPhaseIcon(uint8_t idx, bool recenter) {
+  currentNotifIdx = idx;
+  notifPhase      = PHASE_ICON;
+  phaseStartMs    = millis();
+  lastNotifAnimMs = 0;
+  notifAnimStep   = 0;
+  if (recenter) {
+    notifNeedsCenterPan = true;
+  }
+}
+
 // --- Gestión de Cola de Notificaciones (con agrupación por remitente) ---
 void enqueueNotification(NotifType type, const char* senderRaw, int16_t meetOffsetMin = 0) {
-  bool wasEmpty = (notifCount == 0);
   isSleeping = false;
 
   while (*senderRaw == ' ' || *senderRaw == ':') {
@@ -758,6 +773,7 @@ void enqueueNotification(NotifType type, const char* senderRaw, int16_t meetOffs
         notifQueue[i].startOffsetMin = meetOffsetMin;
         notifQueue[i].rxMillis       = millis();
         if (meetOffsetMin <= 0) {
+          beginNotifPhaseIcon(i, false);
           notifNeedsAttentionWiggle = true;
         }
         return;
@@ -769,6 +785,9 @@ void enqueueNotification(NotifType type, const char* senderRaw, int16_t meetOffs
       if (notifQueue[i].type == type && sameSenderName(notifQueue[i].sender, cleanName)) {
         if (notifQueue[i].count < 99) {
           notifQueue[i].count++;
+        }
+        if (notifPhase == PHASE_REST) {
+          beginNotifPhaseIcon(i, true);
         }
         return;
       }
@@ -799,14 +818,8 @@ void enqueueNotification(NotifType type, const char* senderRaw, int16_t meetOffs
     notifNeedsAttentionWiggle = true;
   }
 
-  if (wasEmpty) {
-    currentNotifIdx     = 0;
-    notifPhase          = PHASE_ICON;
-    phaseStartMs        = millis();
-    lastNotifAnimMs     = 0;
-    notifAnimStep       = 0;
-    notifNeedsCenterPan = true;
-  }
+  // Mostrar de inmediato cada aviso recién llegado antes de volver a la carita viva
+  beginNotifPhaseIcon(notifCount - 1, true);
 }
 
 void parseMeetingPayload(const char* payload) {
@@ -1009,13 +1022,7 @@ void dismissCurrentNotification() {
   delay(250);
 
   if (notifCount > 0) {
-    if (currentNotifIdx >= notifCount) {
-      currentNotifIdx = 0;
-    }
-    notifPhase      = PHASE_ICON;
-    phaseStartMs    = millis();
-    lastNotifAnimMs = 0;
-    notifAnimStep   = 0;
+    beginNotifPhaseIcon((currentNotifIdx >= notifCount) ? 0 : currentNotifIdx, true);
   } else {
     currentNotifIdx    = 0;
     resumeLivingFaceSmooth(0);
@@ -1576,8 +1583,11 @@ void executeGestureRemoteCmd(const char* arg) {
     Serial.println(F("OK:G:HAPPY"));
   }
 
-  if (notifCount == 0) {
+  if (notifCount == 0 || notifPhase == PHASE_REST) {
     resumeLivingFaceSmooth();
+    if (notifPhase == PHASE_REST) {
+      phaseStartMs = millis();
+    }
   }
   pauseStartMs       = millis();
   nextObservePauseMs = pickRandomObservePauseMs();
@@ -1605,8 +1615,11 @@ void executePendingRemoteCommand() {
     if (argCopy[0] != '\0') {
       scrollText(argCopy, false, false);
     }
-    if (notifCount == 0 && pendingRemoteKind == RCMD_NONE) {
+    if ((notifCount == 0 || notifPhase == PHASE_REST) && pendingRemoteKind == RCMD_NONE) {
       resumeLivingFaceSmooth();
+      if (notifPhase == PHASE_REST) {
+        phaseStartMs = millis();
+      }
     }
     Serial.println(F("OK:T"));
   }
@@ -1682,11 +1695,31 @@ void loop() {
   }
 
   // ==========================================================================
-  // MODO COLA DE NOTIFICACIONES (Mail ✉ / Chat 💬 / Reuniones ⏰)
+  // MODO COLA DE NOTIFICACIONES (Mail ✉ / Chat 💬 / Reuniones ⏰ + Carita Viva)
   // ==========================================================================
   if (notifCount > 0) {
     if (currentNotifIdx >= notifCount) {
       currentNotifIdx = 0;
+    }
+
+    // Fase de descanso entre recordatorios: muestra la carita viva y checkea mano (<= 10 cm)
+    if (notifPhase == PHASE_REST) {
+      updateLivingFace();
+
+      if (millis() - lastIdleSonarMs >= 60UL) {
+        lastIdleSonarMs = millis();
+        if (isSomeoneNear()) {
+          dismissCurrentNotification();
+          return;
+        }
+      }
+
+      if (millis() - phaseStartMs >= NOTIF_REST_MS) {
+        beginNotifPhaseIcon((currentNotifIdx + 1) % notifCount, true);
+      } else {
+        delay(20);
+      }
+      return;
     }
 
     if (notifNeedsCenterPan || notifNeedsAttentionWiggle) {
@@ -1746,11 +1779,12 @@ void loop() {
     }
 
     if (notifCount > 0) {
-      currentNotifIdx = (currentNotifIdx + 1) % notifCount;
-      notifPhase      = PHASE_ICON;
+      // Volver a mostrar la carita viva durante NOTIF_REST_MS antes de repetir el siguiente aviso
+      notifPhase      = PHASE_REST;
       phaseStartMs    = millis();
       lastNotifAnimMs = 0;
       notifAnimStep   = 0;
+      resumeLivingFaceSmooth(0);
     } else {
       resumeLivingFaceSmooth(0);
     }

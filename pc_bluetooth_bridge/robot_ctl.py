@@ -94,7 +94,7 @@ def send_via_bridge(commands: list[str]) -> tuple[bool, list[str]]:
         except OSError as exc:
             return False, [f"ERR:INBOX:{exc}"]
 
-        deadline = time.time() + 5.5
+        deadline = time.time() + 10.5
         got_reply = None
         while time.time() < deadline:
             if os.path.exists(CMD_REPLY_FILE):
@@ -184,7 +184,7 @@ async def send_direct_ble(commands: list[str]) -> tuple[bool, list[str]]:
                     await asyncio.sleep(0.03)
 
             try:
-                rep = await asyncio.wait_for(ack_queue.get(), timeout=3.5)
+                rep = await asyncio.wait_for(ack_queue.get(), timeout=8.5)
             except asyncio.TimeoutError:
                 rep = "SENT"
             replies.append(rep)
@@ -204,6 +204,7 @@ def format_stat_line(line: str) -> str:
             k, v = pair.split("=", 1)
             kv[k.strip()] = v.strip()
     dist = kv.get("DIST", "?")
+    dist_txt = "despejado (LIBRE)" if dist == "LIBRE" else f"{dist} cm"
     desk = "en escritorio" if kv.get("DESK") == "1" else "levantado en el aire"
     zone_map = {
         "-3": "extremo izq (-3)",
@@ -219,7 +220,7 @@ def format_stat_line(line: str) -> str:
     sleeping = "durmiendo (Zzz)" if kv.get("SLEEP") == "1" else "despierto"
     return (
         f"{line}\n"
-        f"  -> Estado: {sleeping} | Posición: {desk} | Obstáculo frontal: {dist} cm | "
+        f"  -> Estado: {sleeping} | Posición: {desk} | Obstáculo frontal: {dist_txt} | "
         f"Mirada/Cuello: {zone} ({kv.get('PULSE', '?')} us) | Notificaciones pendientes: {notif}"
     )
 

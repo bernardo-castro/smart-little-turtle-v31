@@ -880,7 +880,7 @@ async def main() -> None:
                             await send_ble_payload(client, target_char, payload)
                             reply_line = "SENT"
                             try:
-                                reply_line = await asyncio.wait_for(ack_queue.get(), timeout=3.5)
+                                reply_line = await asyncio.wait_for(ack_queue.get(), timeout=8.5)
                             except asyncio.TimeoutError:
                                 pass
                             write_cmd_reply(req_id, raw_cmd, True, reply_line)
