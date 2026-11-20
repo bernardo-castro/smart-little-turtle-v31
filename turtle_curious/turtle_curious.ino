@@ -61,11 +61,11 @@ unsigned long cfgObserveMaxMs  = 30000UL; // Pausa aleatoria máx: 30 s
 unsigned long cfgIconHoldMs    = 1800UL;  // Segundos mostrando ícono antes del texto
 unsigned long cfgNotifRestMs   = 16000UL; // Pausa mostrando carita viva entre recordatorios
 unsigned int  cfgScrollStepMs  = 56;      // Velocidad ágil de desplazamiento de texto
-float         cfgTrackStartCm  = 15.0f;   // Distancia enganche de mano (0 = desactivado)
+float         cfgTrackStartCm  = 0.0f;    // Seguimiento de mano desactivado por defecto (0 = off)
 bool          cfgPanEnabled    = true;    // Paneos aleatorios curiosos en reposo
-unsigned long cfgNearTriggerMs = 5000UL;  // Tiempo frente al sensor para disparar regla (0 = off)
+unsigned long cfgNearTriggerMs = 120UL;   // Reacción inmediata (~0.12 s) al poner algo enfrente
 bool          cfgAngryStepBack = true;    // Micro-paso atrás al enojarse
-char          cfgNearAction[28] = "RANDOM"; // Acción al disparar regla de proximidad (RANDOM = variada)
+char          cfgNearAction[28] = "RANDOM"; // Acción al disparar regla de proximidad (RANDOM = 15 reacciones)
 
 // --- Sensor Ultrasónico ---
 const int   TRIG_PIN        = 12;
@@ -865,9 +865,9 @@ void resetConfigDefaults() {
   cfgIconHoldMs    = 1800UL;
   cfgNotifRestMs   = 16000UL;
   cfgScrollStepMs  = 56;
-  cfgTrackStartCm  = 15.0f;
+  cfgTrackStartCm  = 0.0f;
   cfgPanEnabled    = true;
-  cfgNearTriggerMs = 5000UL;
+  cfgNearTriggerMs = 120UL;
   cfgAngryStepBack = true;
   strcpy(cfgNearAction, "RANDOM");
 }
@@ -980,7 +980,7 @@ void applyAutomationCmd(const char* rawPayload) {
       *pAct = '\0';
       pAct++;
       long msVal = atol(pMs);
-      cfgNearTriggerMs = (msVal <= 0) ? 0UL : (unsigned long)constrain(msVal, 500L, 60000L);
+      cfgNearTriggerMs = (msVal <= 0) ? 0UL : (unsigned long)constrain(msVal, 50L, 60000L);
       while (*pAct == ' ') pAct++;
       strncpy(cfgNearAction, pAct, sizeof(cfgNearAction) - 1);
       cfgNearAction[sizeof(cfgNearAction) - 1] = '\0';
@@ -1231,8 +1231,8 @@ bool panSmoothTo(int targetPulseUs, bool stopOnNear = true, bool animateFace = f
       updateLivingFace();
     }
 
-    if (stopOnNear && cfgTrackStartCm > 0.5f) {
-      if (readDistanceFastCm() <= cfgTrackStartCm) {
+    if (stopOnNear && cfgNearTriggerMs > 0) {
+      if (readDistanceFastCm() <= 15.0f) {
         nearHits++;
         if (nearHits >= 2) {
           digitalWrite(SERVO_PIN, LOW);
@@ -1520,103 +1520,207 @@ void pulseSafeMotors(bool lFwd, bool rFwd, uint8_t speedPwm, unsigned long durMs
 
 void triggerRandomBlockedReaction() {
   static int8_t lastIdx = -1;
-  int8_t choice = (int8_t)random(0, 5);
+  int8_t choice = (int8_t)random(0, 15);
   if (choice == lastIdx) {
-    choice = (choice + 1 + (int8_t)random(0, 4)) % 5;
+    choice = (choice + 1 + (int8_t)random(0, 14)) % 15;
   }
   lastIdx = choice;
 
   setMatrixBrightness(BRIGHTNESS_TEXT_GESTURE);
   int baseUs = currentPulseUs;
 
-  if (choice == 0) {
-    // 1) Agresivo: cara >:[ + embestida corta a la mano + sigue gruñendo hasta que la quiten
-    showRowsP(ICON_ANGRY_0);
-    panSmoothTo(constrain(baseUs - 140, TRACK_PULSE_MIN_US, TRACK_PULSE_MAX_US), false, false);
-    showRowsP(ICON_ANGRY_1);
-    panSmoothTo(constrain(baseUs + 140, TRACK_PULSE_MIN_US, TRACK_PULSE_MAX_US), false, false);
-    panSmoothTo(baseUs, false, false);
-
-    pulseSafeMotors(true, true, 185, 165);   // Topetazo hacia la mano
-    pulseSafeMotors(false, false, 165, 95);  // Pequeño rebote
-
-    uint8_t clearHits = 0;
-    unsigned long t0 = millis();
-    bool nudgeDir = true;
-    unsigned long lastNudgeMs = millis();
-    while (millis() - t0 < 8000UL) {
-      pollBluetooth();
-      if (isRobotLifted()) { handleLiftedReaction(); return; }
-      if (notifCount > 0 || pendingRemoteKind != RCMD_NONE) return;
-
-      showRowsP((((millis() / 220UL) % 2UL) == 0UL) ? ICON_ANGRY_0 : ICON_ANGRY_1);
-      if (millis() - lastNudgeMs >= 900UL) {
-        lastNudgeMs = millis();
-        pulseSafeMotors(nudgeDir, !nudgeDir, 170, 95);
-        nudgeDir = !nudgeDir;
+  switch (choice) {
+    case 0: {
+      // 1) Agresivo: cara >:[ + embestida a la mano + sigue gruñendo hasta que la quiten
+      showRowsP(ICON_ANGRY_0);
+      panSmoothTo(constrain(baseUs - 140, TRACK_PULSE_MIN_US, TRACK_PULSE_MAX_US), false, false);
+      showRowsP(ICON_ANGRY_1);
+      panSmoothTo(constrain(baseUs + 140, TRACK_PULSE_MIN_US, TRACK_PULSE_MAX_US), false, false);
+      panSmoothTo(baseUs, false, false);
+      pulseSafeMotors(true, true, 185, 170);
+      pulseSafeMotors(false, false, 165, 95);
+      uint8_t clearHits = 0;
+      unsigned long t0 = millis(), lastNudgeMs = millis();
+      bool nudgeDir = true;
+      while (millis() - t0 < 6000UL) {
+        pollBluetooth();
+        if (isRobotLifted()) { handleLiftedReaction(); return; }
+        if (notifCount > 0 || pendingRemoteKind != RCMD_NONE) return;
+        showRowsP((((millis() / 220UL) % 2UL) == 0UL) ? ICON_ANGRY_0 : ICON_ANGRY_1);
+        if (millis() - lastNudgeMs >= 800UL) {
+          lastNudgeMs = millis();
+          pulseSafeMotors(nudgeDir, !nudgeDir, 170, 95);
+          nudgeDir = !nudgeDir;
+        }
+        if (readDistanceFastCm() > 16.0f) {
+          if (++clearHits >= 3) break;
+        } else {
+          clearHits = 0;
+        }
+        delay(45);
       }
-      if (readTrackDistanceCm(false) > 14.0f) {
-        clearHits++;
-        if (clearHits >= 3) break;
-      } else {
-        clearHits = 0;
-      }
-      delay(45);
+      break;
     }
-  } else if (choice == 1) {
-    // 2) Esquivo / "Déjame ver": gira buscando vista despejada con caras O_o y ?
-    showRows(ICON_LIFT_Oo);
-    bool turnLeft = (random(0, 2) == 0);
-    for (uint8_t step = 0; step < 5; step++) {
-      pollBluetooth();
-      if (isRobotLifted()) { handleLiftedReaction(); return; }
-      if (notifCount > 0 || pendingRemoteKind != RCMD_NONE) return;
-
-      showRowsP((step % 2 == 0) ? ICON_THINK_0 : ICON_THINK_2);
-      pulseSafeMotors(!turnLeft, turnLeft, 175, 210);
-      delay(120);
-      if (readDistanceFastCm() > 16.0f) {
-        showRows(ICON_HAPPY);
-        waitInteractiveMs(700);
-        return;
+    case 1: {
+      // 2) Esquivo / "Déjame ver": gira buscando vista despejada
+      showRows(ICON_LIFT_Oo);
+      bool turnLeft = (random(0, 2) == 0);
+      for (uint8_t step = 0; step < 5; step++) {
+        pollBluetooth();
+        if (isRobotLifted()) { handleLiftedReaction(); return; }
+        if (notifCount > 0 || pendingRemoteKind != RCMD_NONE) return;
+        showRowsP((step % 2 == 0) ? ICON_THINK_0 : ICON_THINK_2);
+        pulseSafeMotors(!turnLeft, turnLeft, 175, 210);
+        delay(100);
+        if (readDistanceFastCm() > 16.5f) {
+          showRows(ICON_HAPPY);
+          waitInteractiveMs(650);
+          return;
+        }
+        showRows(ICON_LIFT_oO);
       }
-      showRows(ICON_LIFT_oO);
+      break;
     }
-  } else if (choice == 2) {
-    // 3) Indignado: sorpresa O_o, retrocede y dice NO con la cabeza
-    showRows(ICON_LIFT_Oo);
-    pulseSafeMotors(false, false, 165, 180);
-    showRowsP(ICON_ANGRY_0);
-    panSmoothTo(PULSE_CENTER_US - 200, false, false);
-    showRowsP(ICON_ANGRY_1);
-    panSmoothTo(PULSE_CENTER_US + 200, false, false);
-    panSmoothTo(PULSE_CENTER_US - 150, false, false);
-    panSmoothTo(baseUs, false, false);
-    waitInteractiveMs(450);
-  } else if (choice == 3) {
-    // 4) Juguetón / Cariñoso: sonríe y late el corazón con meneo alegre
-    showRows(ICON_HAPPY);
-    panSmoothTo(constrain(baseUs - 160, TRACK_PULSE_MIN_US, TRACK_PULSE_MAX_US), false, false);
-    panSmoothTo(constrain(baseUs + 160, TRACK_PULSE_MIN_US, TRACK_PULSE_MAX_US), false, false);
-    panSmoothTo(baseUs, false, false);
-    for (uint8_t i = 0; i < 3; i++) {
+    case 2: {
+      // 3) Indignado: sorpresa O_o, retrocede y niega con la cabeza
+      showRows(ICON_LIFT_Oo);
+      pulseSafeMotors(false, false, 165, 180);
+      showRowsP(ICON_ANGRY_0);
+      panSmoothTo(PULSE_CENTER_US - 200, false, false);
+      showRowsP(ICON_ANGRY_1);
+      panSmoothTo(PULSE_CENTER_US + 200, false, false);
+      panSmoothTo(PULSE_CENTER_US - 150, false, false);
+      panSmoothTo(baseUs, false, false);
+      waitInteractiveMs(400);
+      break;
+    }
+    case 3: {
+      // 4) Juguetón / Cariñoso: sonríe y late corazón
+      showRows(ICON_HAPPY);
+      panSmoothTo(constrain(baseUs - 160, TRACK_PULSE_MIN_US, TRACK_PULSE_MAX_US), false, false);
+      panSmoothTo(constrain(baseUs + 160, TRACK_PULSE_MIN_US, TRACK_PULSE_MAX_US), false, false);
+      panSmoothTo(baseUs, false, false);
+      for (uint8_t i = 0; i < 3; i++) {
+        showRowsP(ICON_HEART_BIG);
+        if (!waitInteractiveMs(300)) return;
+        showRowsP(ICON_HEART_SMALL);
+        if (!waitInteractiveMs(200)) return;
+      }
+      break;
+    }
+    case 4: {
+      // 5) Curioso: inspecciona la mano de lado a lado pensando
+      showRowsP(ICON_THINK_0);
+      panSmoothTo(constrain(baseUs - 140, TRACK_PULSE_MIN_US, TRACK_PULSE_MAX_US), false, false);
+      showRowsP(ICON_THINK_1);
+      if (!waitInteractiveMs(280)) return;
+      panSmoothTo(constrain(baseUs + 140, TRACK_PULSE_MIN_US, TRACK_PULSE_MAX_US), false, false);
+      showRowsP(ICON_THINK_2);
+      if (!waitInteractiveMs(340)) return;
+      panSmoothTo(baseUs, false, false);
+      showRows(ICON_HAPPY);
+      waitInteractiveMs(400);
+      break;
+    }
+    case 5: {
+      // 6) Susto eléctrico: tiembla rápido y retrocede asombrado
+      for (uint8_t i = 0; i < 4; i++) {
+        showRows((i % 2 == 0) ? ICON_LIFT_Oo : ICON_LIFT_oO);
+        pulseSafeMotors((i % 2 == 0), (i % 2 != 0), 175, 75);
+      }
+      pulseSafeMotors(false, false, 165, 160);
+      waitInteractiveMs(500);
+      break;
+    }
+    case 6: {
+      // 7) Toro bravo: toma impulso atrás y embiste de frente
+      showRowsP(ICON_ANGRY_0);
+      pulseSafeMotors(false, false, 165, 140);
+      panSmoothTo(PULSE_CENTER_US, false, false);
+      showRowsP(ICON_ANGRY_1);
+      pulseSafeMotors(true, true, 195, 190);
+      waitInteractiveMs(450);
+      break;
+    }
+    case 7: {
+      // 8) Desplante: da media vuelta y se aleja sonriendo
+      showRows(ICON_HAPPY);
+      bool left = (random(0, 2) == 0);
+      pulseSafeMotors(!left, left, 180, 320);
+      pulseSafeMotors(true, true, 165, 150);
+      waitInteractiveMs(450);
+      break;
+    }
+    case 8: {
+      // 9) Bailecito improvisado
+      showRows(ICON_HAPPY);
+      for (uint8_t i = 0; i < 4; i++) {
+        pulseSafeMotors((i % 2 == 0), (i % 2 != 0), 175, 135);
+      }
+      panSmoothTo(PULSE_CENTER_US - 220, false, false);
+      panSmoothTo(PULSE_CENTER_US + 220, false, false);
+      panSmoothTo(PULSE_CENTER_US, false, false);
       showRowsP(ICON_HEART_BIG);
-      if (!waitInteractiveMs(320)) return;
-      showRowsP(ICON_HEART_SMALL);
-      if (!waitInteractiveMs(220)) return;
+      waitInteractiveMs(500);
+      break;
     }
-  } else {
-    // 5) Curioso: inspecciona la mano de cerca pensando qué es
-    showRowsP(ICON_THINK_0);
-    panSmoothTo(constrain(baseUs - 130, TRACK_PULSE_MIN_US, TRACK_PULSE_MAX_US), false, false);
-    showRowsP(ICON_THINK_1);
-    if (!waitInteractiveMs(320)) return;
-    panSmoothTo(constrain(baseUs + 130, TRACK_PULSE_MIN_US, TRACK_PULSE_MAX_US), false, false);
-    showRowsP(ICON_THINK_2);
-    if (!waitInteractiveMs(380)) return;
-    panSmoothTo(baseUs, false, false);
-    showRows(ICON_HAPPY);
-    waitInteractiveMs(450);
+    case 9: {
+      // 10) Protesta con texto corto "EY!"
+      showRowsP(ICON_ANGRY_0);
+      panSmoothTo(constrain(baseUs - 130, TRACK_PULSE_MIN_US, TRACK_PULSE_MAX_US), false, false);
+      panSmoothTo(baseUs, false, false);
+      scrollText("EY!", false, false);
+      break;
+    }
+    case 10: {
+      // 11) Desafío con texto "GRR!" y amague adelante
+      showRowsP(ICON_ANGRY_1);
+      pulseSafeMotors(true, true, 180, 115);
+      scrollText("GRR!", false, false);
+      break;
+    }
+    case 11: {
+      // 12) Timidez: desvía la mirada al extremo y vuelve despacito
+      showRows(ICON_LIFT_oO);
+      int sideUs = (random(0, 2) == 0) ? PULSE_MIN_US : PULSE_MAX_US;
+      panSmoothTo(sideUs, false, false);
+      if (!waitInteractiveMs(750)) return;
+      showRows(ICON_HAPPY);
+      panSmoothTo(PULSE_CENTER_US, false, false);
+      break;
+    }
+    case 12: {
+      // 13) Pataleta en el lugar (adelante-atrás rápido)
+      for (uint8_t i = 0; i < 2; i++) {
+        showRowsP(ICON_ANGRY_0);
+        pulseSafeMotors(true, true, 180, 95);
+        showRowsP(ICON_ANGRY_1);
+        pulseSafeMotors(false, false, 180, 95);
+      }
+      waitInteractiveMs(350);
+      break;
+    }
+    case 13: {
+      // 14) Saludo inesperado "HOLA!" + corazón
+      showRows(ICON_HAPPY);
+      panSmoothTo(PULSE_CENTER_US - 180, false, false);
+      panSmoothTo(PULSE_CENTER_US + 180, false, false);
+      panSmoothTo(PULSE_CENTER_US, false, false);
+      scrollText("HOLA!", false, false);
+      showRowsP(ICON_HEART_BIG);
+      waitInteractiveMs(500);
+      break;
+    }
+    default: {
+      // 15) Modo "te ignoro / me duermo" 1.6 s y despierta O_o
+      for (uint8_t i = 0; i < 4; i++) {
+        showRowsP((i % 2 == 0) ? ICON_SLEEP_0 : ICON_SLEEP_1);
+        if (!waitInteractiveMs(400)) return;
+      }
+      showRows(ICON_LIFT_Oo);
+      waitInteractiveMs(450);
+      break;
+    }
   }
 }
 
@@ -2261,21 +2365,18 @@ void loop() {
 
   if (millis() - lastIdleSonarMs >= 55UL) {
     lastIdleSonarMs = millis();
-    if (isHandReadyToTrack()) {
-      trackHandWithEyes();
-      pauseStartMs       = millis();
-      nextObservePauseMs = pickRandomObservePauseMs();
-      return;
-    }
-    if (cfgTrackStartCm <= 0.5f && cfgNearTriggerMs > 0) {
+    if (cfgNearTriggerMs > 0) {
       static unsigned long idleNearStartMs = 0;
       float d = readDistanceFastCm();
-      if (d <= 12.5f) {
+      if (d <= 15.0f) {
         if (idleNearStartMs == 0) {
           idleNearStartMs = millis();
         } else if (millis() - idleNearStartMs >= cfgNearTriggerMs) {
           idleNearStartMs = 0;
           executeNearTriggerAction();
+          if (notifCount == 0 && pendingRemoteKind == RCMD_NONE) {
+            resumeLivingFaceSmooth();
+          }
           pauseStartMs       = millis();
           nextObservePauseMs = pickRandomObservePauseMs();
           return;
@@ -2290,8 +2391,11 @@ void loop() {
     int randomTargetUs = pickRandomTargetUs();
     bool spottedSomeone = panSmoothTo(randomTargetUs, true, true);
 
-    if (spottedSomeone && notifCount == 0) {
-      trackHandWithEyes();
+    if (spottedSomeone && notifCount == 0 && cfgNearTriggerMs > 0) {
+      executeNearTriggerAction();
+      if (notifCount == 0 && pendingRemoteKind == RCMD_NONE) {
+        resumeLivingFaceSmooth();
+      }
     }
 
     pauseStartMs       = millis();
